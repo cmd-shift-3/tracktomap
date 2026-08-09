@@ -1,0 +1,685 @@
+/* Светлая тема — значения по умолчанию (:root). Тёмная тема переопределяет
+   те же переменные через [data-theme="dark"] на <html> — весь остальной CSS
+   ссылается только на переменные и не знает, какая тема активна. */
+:root {
+  --bg: #f5f2ec;
+  --panel: #ffffff;
+  --panel-raised: #f0ece1;
+  --border: #d8d2c4;
+  --text: #22201b;
+  --text-muted: #746c5e;
+  --accent-amber: #a5691f;
+  --accent-green: #3d8059;
+  --accent-red: #c0392b;
+  --accent-purple: #a21caf;
+  --on-accent: #fdf9f2; /* текст поверх --accent-amber: в светлой теме амбер тёмный, нужен светлый текст */
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --sans: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+[data-theme="dark"] {
+  --bg: #10151a;
+  --panel: #171e24;
+  --panel-raised: #1d252b;
+  --border: #2a343b;
+  --text: #e7ece9;
+  --text-muted: #8b9aa1;
+  --accent-amber: #c1893f;
+  --accent-green: #4a9d6f;
+  --accent-red: #d9534f;
+  --accent-purple: #c026d3;
+  --on-accent: #14181a; /* в тёмной теме --accent-amber светлее — тёмный текст читается лучше */
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden; /* прокручиваются только .sidebar и .canvas-area внутри .layout, а не вся страница */
+  background: var(--bg);
+  background-image:
+    repeating-radial-gradient(circle at 15% 20%, rgba(193,137,63,0.04) 0, rgba(193,137,63,0.04) 1px, transparent 1px, transparent 40px),
+    repeating-radial-gradient(circle at 85% 75%, rgba(74,157,111,0.04) 0, rgba(74,157,111,0.04) 1px, transparent 1px, transparent 55px);
+  color: var(--text);
+  font-family: var(--sans);
+  /* flex-колонка вместо фиксированной height:calc(100vh - 53px) на .layout:
+     раньше .layout вычитал "магическое число" (высоту топбара) из 100vh, и
+     если реальная высота топбара хоть немного отличалась (другие шрифты,
+     масштаб страницы, браузер), .layout получался выше видимой области —
+     а поскольку и body, и .layout были overflow:hidden, разница просто
+     обрезалась, и вертикальная прокрутка внутри .canvas-area переставала
+     доставать до реального низа контента. Гор.прокрутка не завист от этого
+     расчёта, поэтому и работала нормально. Flex-колонка с .layout{flex:1}
+     всегда даёт ровно оставшуюся высоту — без обрезки. */
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+h2 {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+
+/* ---------- Topbar ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.brand-icon {
+  width: 22px;
+  height: 20px;
+  flex-shrink: 0;
+}
+/* Контур карты и линии сгиба — нейтральный "муted"-цвет темы, трек —
+   акцентный амбер, шарниры на сгибах — акцентный зелёный. Всё через
+   переменные темы, поэтому лого само перекрашивается при переключении. */
+.brand-icon .map-outline,
+.brand-icon .map-fold {
+  stroke: var(--text-muted);
+}
+.brand-icon .map-fold {
+  opacity: 0.55;
+}
+.brand-icon .route-line {
+  stroke: var(--accent-amber);
+}
+.brand-icon .hinge-dot {
+  fill: var(--accent-green);
+  stroke: var(--panel);
+  stroke-width: 1;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* Пока карта не загружена, единственная точка входа для файлов — окошко
+   дропзоны по центру экрана; дублирующие кнопки в шапке только мешают.
+   Переключатель темы (в .topbar-right, но вне .topbar-actions) при этом
+   остаётся на месте — тема не привязана к тому, загружена ли карта. */
+body.no-map .topbar-actions {
+  display: none;
+}
+
+.theme-toggle {
+  position: relative; /* иконки солнца/луны абсолютно позиционированы друг над другом для кроссфейда */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.theme-toggle:hover {
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
+}
+.theme-toggle svg {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+/* По умолчанию (светлая тема) видна луна — клик переключит на тёмную.
+   В [data-theme="dark"] — наоборот, видно солнце для возврата к светлой.
+   Вместо display:none/block (не анимируется) — кроссфейд с поворотом и
+   лёгким уменьшением уходящей иконки, чтобы смена ощущалась как жест,
+   а не мгновенное переключение. */
+.theme-toggle .icon-sun {
+  opacity: 0;
+  transform: translate(-50%, -50%) rotate(-90deg) scale(0.4);
+}
+.theme-toggle .icon-moon {
+  opacity: 1;
+  transform: translate(-50%, -50%) rotate(0deg) scale(1);
+}
+[data-theme="dark"] .theme-toggle .icon-sun {
+  opacity: 1;
+  transform: translate(-50%, -50%) rotate(0deg) scale(1);
+}
+[data-theme="dark"] .theme-toggle .icon-moon {
+  opacity: 0;
+  transform: translate(-50%, -50%) rotate(90deg) scale(0.4);
+}
+
+.file-btn {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-raised);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.file-btn:hover { border-color: var(--accent-amber); }
+
+.file-btn.primary {
+  background: var(--accent-amber);
+  color: var(--on-accent);
+  border-color: var(--accent-amber);
+  font-weight: 700;
+}
+
+.file-btn.primary:hover { filter: brightness(1.08); }
+
+/* ---------- Layout ---------- */
+
+.layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0; /* без этого grid-строка не сжимается меньше высоты контента, и .canvas-area не может получить собственный overflow-скролл */
+  overflow: hidden;
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  min-height: 0; /* позволяет сайдбару сжиматься в grid-строке и скроллиться самому, независимо от карты */
+}
+
+/* Единый тонкий скроллбар — и для сайдбара, и для области карты. */
+.sidebar,
+.canvas-area {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--border) transparent; /* Firefox */
+}
+.sidebar::-webkit-scrollbar,
+.canvas-area::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.sidebar::-webkit-scrollbar-track,
+.canvas-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar::-webkit-scrollbar-thumb,
+.canvas-area::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 4px;
+}
+.sidebar::-webkit-scrollbar-thumb:hover,
+.canvas-area::-webkit-scrollbar-thumb:hover {
+  background-color: var(--accent-amber);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+}
+
+.panel.hidden { display: none; }
+.hidden { display: none !important; }
+
+.panel-toggle {
+  all: unset;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  cursor: pointer;
+  margin-bottom: 12px;
+  transition: margin-bottom 0.25s ease;
+}
+.panel-toggle h2 { margin: 0; }
+.panel-toggle .chevron {
+  color: var(--text-muted);
+  font-size: 10px;
+  transition: transform 0.25s ease;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+.collapsible.collapsed .panel-toggle { margin-bottom: 0; }
+.collapsible.collapsed .chevron { transform: rotate(-90deg); }
+
+.panel-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.25s ease;
+}
+.collapsible.collapsed .panel-collapse { grid-template-rows: 0fr; }
+.panel-collapse-inner { overflow: hidden; min-height: 0; }
+
+/* До загрузки карты левое меню не нужно — показываем его только когда есть что настраивать. */
+.layout.no-map { grid-template-columns: 1fr; }
+.layout.no-map .sidebar { display: none; }
+
+/* ---------- Stats ---------- */
+
+.stat-list { margin: 0; }
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-row dt { color: var(--text-muted); font-size: 12.5px; }
+.stat-row dd { margin: 0; font-family: var(--mono); font-weight: 700; font-size: 13.5px; }
+
+/* ---------- Calibration ---------- */
+
+.hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0 0 12px;
+}
+
+.field-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+input[type="range"] {
+  /* .sidebar задаёт только overflow-y: auto, но по спеке CSS это неявно
+     переключает overflow-x тоже в auto (нельзя оставить одну ось visible,
+     если другая — нет). Из-за этого правая часть нативного "бегунка"
+     ползунка, которая обычно чуть выходит за границы самого <input>,
+     начинает обрезаться на пару пикселей. Небольшой отступ справа даёт
+     бегунку место, не выходя за родительский паддинг. */
+  display: block;
+  width: calc(100% - 6px);
+  margin-right: 6px;
+  accent-color: var(--accent-amber);
+}
+
+.segmented {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.segmented button {
+  flex: 1;
+  padding: 7px 8px;
+  border: none;
+  background: var(--panel-raised);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.segmented button + button { border-left: 1px solid var(--border); }
+.segmented button.active {
+  background: var(--accent-amber);
+  color: var(--on-accent);
+  font-weight: 700;
+}
+.segmented button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.time-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.time-input-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel-raised);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.time-input-row input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-amber);
+}
+.time-input-row input[type="text"]:disabled { opacity: 0.4; }
+.btn.small {
+  width: auto;
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
+.slider-label {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent-amber);
+  margin: 4px 0 12px;
+}
+
+.btn {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--accent-amber);
+  background: rgba(193,137,63,0.12);
+  color: var(--accent-amber);
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn:hover { background: rgba(193,137,63,0.22); }
+.btn.armed {
+  background: var(--accent-amber);
+  color: var(--on-accent);
+}
+.btn.ghost {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-muted);
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.calib-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.calib-actions .btn { width: auto; flex: 1; }
+
+.control-point-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.control-point-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 5px 8px;
+  background: var(--panel-raised);
+  border-radius: 3px;
+}
+.control-point-list .cp-num {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.control-point-list .cp-time-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 3px 5px;
+}
+.control-point-list .cp-time-input:hover {
+  border-color: var(--border);
+}
+.control-point-list .cp-time-input:focus {
+  outline: none;
+  border-color: var(--accent-amber);
+  background: var(--panel);
+}
+.control-point-list .cp-time-input:disabled {
+  opacity: 0.5;
+}
+
+.slider-field {
+  margin-bottom: 12px;
+}
+.slider-field:last-child { margin-bottom: 0; }
+.slider-field .field-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.field-value {
+  color: var(--accent-amber);
+  font-family: var(--mono);
+}
+.control-point-list button {
+  background: none;
+  border: none;
+  color: var(--accent-red);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.fit-quality {
+  margin: 12px 0 0;
+  font-size: 11px;
+  color: var(--accent-green);
+  line-height: 1.5;
+}
+
+/* ---------- Legend ---------- */
+
+.legend-gradient {
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, hsl(120,85%,45%), hsl(60,85%,45%), hsl(0,85%,45%));
+}
+.legend-color-row {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  margin-bottom: 14px;
+}
+.color-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.color-field input[type="color"] {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+.color-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.color-field input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
+
+/* ---------- Canvas ---------- */
+
+.canvas-area {
+  display: grid;
+  justify-items: safe center; /* центрирует карту по горизонтали, но не режет левый край при скролле, если карта шире окна */
+  align-items: start; /* элементы (карта, статус-строка) не растягиваются по высоте своей строки */
+  align-content: start; /* сами строки идут от верхнего края — лишняя высота при зуме уходит вниз и докручивается */
+  padding: 24px;
+  gap: 10px;
+  overflow: auto;
+  min-height: 0; /* позволяет области карты сжиматься в grid-строке .layout и скроллиться независимо от сайдбара */
+}
+
+.canvas-wrap {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0b0f12;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+}
+
+/* На стартовом экране окошко дропзоны — единственный элемент, поэтому
+   центрируем его и по вертикали тоже (в обычном режиме, с картой, контент
+   должен оставаться прижатым к верху — иначе прыгает при зуме). */
+.layout.no-map .canvas-area {
+  align-content: center;
+}
+
+/* До загрузки карты .canvas-wrap сжат до дефолтного размера пустого
+   <canvas> (300×150) — именно из-за этого .empty-state (со своим min-width/
+   min-height и position:absolute) раньше обрезался стенками canvas-wrap
+   (overflow:hidden). Задаём canvas-wrap явный минимальный размер, пока
+   карта не загружена, — тогда дропзона помещается целиком и выглядит как
+   заметное окно, а не мелкая коробка. */
+.layout.no-map .canvas-wrap {
+  min-width: min(640px, 92vw);
+  min-height: min(420px, 65vh);
+  /* Фон #0b0f12 у .canvas-wrap задуман как тёмная подложка вокруг загруженной
+     карты (летербоксинг) и не должен меняться от темы — но пока карты нет,
+     это единственный видимый элемент экрана, и его тёмный фон конфликтует со
+     светлой темой. Пока карта не загружена, используем панельный цвет темы. */
+  background: var(--panel);
+}
+
+canvas {
+  display: block;
+  cursor: grab; /* дефолт для панорамирования зажатой мышью; JS переключает на crosshair/grabbing по ситуации */
+}
+
+.empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 24px;
+}
+.empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+.empty-state p { margin: 0; }
+.empty-hint { font-size: 12px; }
+.empty-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+  pointer-events: auto;
+}
+.empty-actions .file-btn { cursor: pointer; }
+
+/* Подсвечиваем зону при перетаскивании файла над канвасом */
+.canvas-wrap.drag-active {
+  outline: 2px dashed var(--accent-amber);
+  outline-offset: -2px;
+  background: rgba(193,137,63,0.06);
+}
+
+.status-msg {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  min-height: 16px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.status-msg.visible { opacity: 1; }
+.status-msg.error { color: var(--accent-red); }
+
+@media (max-width: 800px) {
+  html, body { height: auto; }
+  body { overflow: visible; display: block; }
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    flex: none;
+    height: auto;
+    overflow: visible;
+  }
+  .sidebar { border-right: none; border-bottom: 1px solid var(--border); overflow-y: visible; }
+}
+
+/* ---------- Анимация смены темы ---------- */
+/* Два независимых механизма — JS в app.js сам выбирает нужный по факту
+   поддержки. Ни один не активируется, если у пользователя включено
+   "уменьшить анимацию" (prefers-reduced-motion) — тема тогда просто
+   переключается мгновенно, как раньше. */
+
+/* 1) Основной путь — View Transitions API (Chrome/Edge, Safari 18+).
+   Даёт круговое раскрытие новой темы из точки клика по кнопке-тумблеру:
+   старый кадр (тема "до") остаётся неподвижным на заднем плане, новый
+   кадр ("после") раскрывается расширяющимся кругом поверх него.
+   --theme-x/--theme-y — координаты клика, JS проставляет их на <html>
+   непосредственно перед вызовом document.startViewTransition(). */
+::view-transition-old(root) {
+  animation: none;
+}
+::view-transition-new(root) {
+  animation: theme-reveal 0.9s ease both;
+}
+
+@keyframes theme-reveal {
+  from {
+    clip-path: circle(0% at var(--theme-x, 50%) var(--theme-y, 50%));
+  }
+  to {
+    clip-path: circle(150% at var(--theme-x, 50%) var(--theme-y, 50%));
+  }
+}
+
+/* 2) Fallback для браузеров без View Transitions API (например, Firefox):
+   на короткое время вокруг смены data-theme все цветовые свойства
+   плавно интерполируются вместо мгновенного переключения. Класс вешает
+   и снимает JS — держать его постоянно нельзя, иначе он перебьёт
+   собственные быстрые transition отдельных интерактивных элементов
+   (например, hover на кнопках) своим !important. */
+.theme-transition,
+.theme-transition * {
+  transition: background-color 0.5s ease, color 0.5s ease,
+    border-color 0.5s ease, fill 0.5s ease, stroke 0.5s ease,
+    box-shadow 0.5s ease, opacity 0.5s ease !important;
+}
