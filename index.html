@@ -64,36 +64,7 @@
             <div class="stat-row"><dt>Время</dt><dd id="statDuration">—</dd></div>
             <div class="stat-row"><dt>Средний темп</dt><dd id="statPace">—</dd></div>
           </dl>
-        </div>
-      </div>
-    </section>
-
-    <section id="trimPanel" class="panel hidden collapsible collapsed">
-      <button type="button" id="trimToggleButton" class="panel-toggle" aria-expanded="false">
-        <h2>Обрезка трека</h2>
-        <span class="chevron">▾</span>
-      </button>
-      <div class="panel-collapse">
-        <div class="panel-collapse-inner">
-          <div class="slider-field">
-            <label class="field-label" for="trimStartSlider">Начало <span id="trimStartValue" class="field-value">—</span></label>
-            <input type="range" id="trimStartSlider" min="0" max="100" value="0" />
-          </div>
-          <div class="time-input-row">
-            <input type="text" id="trimStartInput" placeholder="напр. 0:00" />
-          </div>
-          <div class="slider-field">
-            <label class="field-label" for="trimEndSlider">Конец <span id="trimEndValue" class="field-value">—</span></label>
-            <input type="range" id="trimEndSlider" min="0" max="100" value="100" />
-          </div>
-          <div class="time-input-row">
-            <input type="text" id="trimEndInput" placeholder="напр. 45:00" />
-          </div>
-          <p class="hint" style="margin: 2px 0 12px;">Изменения не влияют на карту и опорные точки, пока не нажата «Применить».</p>
-          <div class="calib-actions">
-            <button id="trimApplyButton" class="btn" type="button" disabled>Применить</button>
-            <button id="trimResetButton" class="btn ghost" type="button">Сбросить</button>
-          </div>
+          <button id="editTrimButton" class="btn ghost small" type="button" style="margin-top: 12px; width: 100%;">Изменить обрезку</button>
         </div>
       </div>
     </section>
@@ -143,7 +114,7 @@
       </div>
     </section>
 
-    <section id="legendPanel" class="panel legend collapsible collapsed">
+    <section id="legendPanel" class="panel legend hidden collapsible collapsed">
       <button type="button" id="legendToggleButton" class="panel-toggle" aria-expanded="false">
         <h2>Темп</h2>
         <span class="chevron">▾</span>
@@ -197,6 +168,32 @@
     <p id="statusMsg" class="status-msg"></p>
   </section>
 </main>
+
+<div id="trimModal" class="modal-overlay hidden">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="trimModalTitle">
+    <h2 id="trimModalTitle">Обрезка трека</h2>
+    <p class="hint">Убери лишнее в начале и конце трека — например, время до старта или после финиша. Это влияет на карту, статистику и точку отсчёта времени.</p>
+
+    <div class="slider-field">
+      <label class="field-label" for="trimModalStartSlider">Начало <span id="trimModalStartValue" class="field-value">—</span></label>
+      <input type="range" id="trimModalStartSlider" min="0" max="100" value="0" />
+    </div>
+    <div class="time-input-row">
+      <input type="text" id="trimModalStartInput" placeholder="напр. 0:00" />
+    </div>
+    <div class="slider-field">
+      <label class="field-label" for="trimModalEndSlider">Конец <span id="trimModalEndValue" class="field-value">—</span></label>
+      <input type="range" id="trimModalEndSlider" min="0" max="100" value="100" />
+    </div>
+    <div class="time-input-row">
+      <input type="text" id="trimModalEndInput" placeholder="напр. 45:00" />
+    </div>
+
+    <div class="calib-actions">
+      <button id="trimModalApplyButton" class="btn" type="button">Применить</button>
+    </div>
+  </div>
+</div>
 
 <script src="js/geo.js"></script>
 <script src="js/transform.js"></script>
