@@ -18,6 +18,7 @@ const state = {
   controlPoints: [], // [{ trackIndex, source:{x,y}m, target:{x,y}imgPx }], всегда отсортирован по trackIndex
   model: null, // buildSegmentedModel(controlPoints): { segments }
   armedForClick: false, // ждём клика по карте для новой опорной точки
+  repositionArmedIndex: null, // индекс опорной точки, для которой ждём клика по карте, чтобы переставить её место
   selectedTrackIndex: 0,
   hoverTrackIndex: null, // точка трека под курсором мыши (предпросмотр перед фиксацией кликом)
   paceColorFast: "#22c55e",
@@ -26,7 +27,7 @@ const state = {
   routeWidth: 4,
   trimStart: 0, // индекс точки трека — начало ПРИМЕНЁННОЙ обрезки (используется в render/статистике/точке отсчёта времени)
   trimEnd: 0, // индекс точки трека — конец ПРИМЕНЁННОЙ обрезки
-  trimStartDraft: 0, // черновые значения слайдеров/полей панели обрезки — не влияют ни на что, пока не нажата "Применить"
+  trimStartDraft: 0, // черновые значения слайдеров/полей модалки обрезки — не влияют ни на что, пока не нажата "Применить"
   trimEndDraft: 0,
 };
 
@@ -42,6 +43,7 @@ const el = {
   statDistance: document.getElementById("statDistance"),
   statDuration: document.getElementById("statDuration"),
   statPace: document.getElementById("statPace"),
+  editTrimButton: document.getElementById("editTrimButton"),
   calibPanel: document.getElementById("calibPanel"),
   timeInput: document.getElementById("timeInput"),
   trackSlider: document.getElementById("trackSlider"),
@@ -52,6 +54,7 @@ const el = {
   undoButton: document.getElementById("undoButton"),
   clearCalibButton: document.getElementById("clearCalibButton"),
   statusMsg: document.getElementById("statusMsg"),
+  legendPanel: document.getElementById("legendPanel"),
   legendGradient: document.getElementById("legendGradient"),
   colorFast: document.getElementById("colorFast"),
   colorSlow: document.getElementById("colorSlow"),
@@ -63,17 +66,16 @@ const el = {
   zoomSlider: document.getElementById("zoomSlider"),
   zoomValue: document.getElementById("zoomValue"),
   zoomResetButton: document.getElementById("zoomResetButton"),
-  trimPanel: document.getElementById("trimPanel"),
-  trimToggleButton: document.getElementById("trimToggleButton"),
-  trimStartSlider: document.getElementById("trimStartSlider"),
-  trimStartValue: document.getElementById("trimStartValue"),
-  trimStartInput: document.getElementById("trimStartInput"),
-  trimEndSlider: document.getElementById("trimEndSlider"),
-  trimEndValue: document.getElementById("trimEndValue"),
-  trimEndInput: document.getElementById("trimEndInput"),
-  trimApplyButton: document.getElementById("trimApplyButton"),
-  trimResetButton: document.getElementById("trimResetButton"),
+  trimModal: document.getElementById("trimModal"),
+  trimModalStartSlider: document.getElementById("trimModalStartSlider"),
+  trimModalStartValue: document.getElementById("trimModalStartValue"),
+  trimModalStartInput: document.getElementById("trimModalStartInput"),
+  trimModalEndSlider: document.getElementById("trimModalEndSlider"),
+  trimModalEndValue: document.getElementById("trimModalEndValue"),
+  trimModalEndInput: document.getElementById("trimModalEndInput"),
+  trimModalApplyButton: document.getElementById("trimModalApplyButton"),
 };
+
 
 el.themeToggleButton = document.getElementById("themeToggleButton");
 
@@ -179,6 +181,7 @@ async function handleMapFile(file) {
     el.emptyState.classList.add("hidden");
     el.zoomPanel.classList.remove("hidden");
     syncZoomUI();
+    updateLegendPanelVisibility();
     showStatus(`Карта загружена: ${file.name} (${img.naturalWidth}×${img.naturalHeight})`);
   } catch (err) {
     showStatus("Не удалось загрузить изображение карты: " + err.message, true);
@@ -197,13 +200,12 @@ async function handleTrackFile(file) {
     state.selectedTrackIndex = 0;
     state.trimStart = 0;
     state.trimEnd = points.length - 1;
-    state.trimStartDraft = 0;
-    state.trimEndDraft = points.length - 1;
     updateStatsPanel();
     updateCalibPanel();
-    updateTrimPanel();
+    updateLegendPanelVisibility();
     render();
     showStatus(`Трек загружен: ${file.name} (${points.length} точек)`);
+    openTrimModal(); // сразу спрашиваем про обрезку, пока пользователь ещё держит контекст загрузки в голове
   } catch (err) {
     showStatus("Не удалось загрузить трек: " + err.message, true);
   }
@@ -567,9 +569,9 @@ function elapsedLabel(index) {
 function findNearestIndexByElapsed(targetSec) {
   const pts = state.trackStats.points;
   const origin = pts[state.trimStart] || pts[0];
-  let bestIdx = 0;
+  let bestIdx = state.trimStart;
   let bestDiff = Infinity;
-  for (let i = 0; i < pts.length; i++) {
+  for (let i = state.trimStart; i <= state.trimEnd; i++) {
     if (!pts[i].time || !origin.time) continue;
     const diff = Math.abs((pts[i].time - origin.time) / 1000 - targetSec);
     if (diff < bestDiff) {
@@ -580,21 +582,194 @@ function findNearestIndexByElapsed(targetSec) {
   return bestIdx;
 }
 
-/** Парсит строку времени ("м:сс" или "ч:мм:сс", можно с "-" впереди для
- *  времени до начала обрезки) в индекс точки трека. null при неверном формате. */
-function parseTimeStringToIndex(raw) {
+/** Парсит строку времени ("м:сс" или "ч:мм:сс") в индекс точки трека,
+ *  используя переданную функцию поиска ближайшей точки по секундам.
+ *  resolveIndex получает и отрицательные значения (см. вызовы ниже) —
+ *  разные контексты (привязка / обрезка) считают время от разных точек
+ *  отсчёта, поэтому сама функция сюда не зашита. */
+function parseTimeStringWith(raw, resolveIndex) {
   if (!raw) return null;
   const trimmed = raw.trim();
   const neg = trimmed.startsWith("-");
   const body = neg ? trimmed.slice(1) : trimmed;
+  if (!body || body.startsWith(":") || body.endsWith(":") || body.includes("::")) return null;
   const parts = body.split(":").map((s) => parseInt(s, 10));
-  if (!parts.length || parts.some((n) => Number.isNaN(n))) return null;
+  if (!parts.length || parts.length > 3 || parts.some((n) => Number.isNaN(n))) return null;
+  // Минуты и секунды (все части, кроме самой первой) должны быть 0-59 —
+  // иначе "3:75" молча превращалось бы в странное время вместо ошибки.
+  if (parts.slice(1).some((n) => n < 0 || n > 59)) return null;
+  if (parts[0] < 0) return null;
 
   let sec;
   if (parts.length === 3) sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
   else if (parts.length === 2) sec = parts[0] * 60 + parts[1];
   else sec = parts[0];
-  return findNearestIndexByElapsed(neg ? -sec : sec);
+  return resolveIndex(neg ? -sec : sec);
+}
+
+/** Время для полей привязки (слайдер точки трека, список опорных точек) —
+ *  всегда отсчитывается от ПРИМЕНЁННОГО trimStart и ищется только внутри
+ *  применённой обрезки (точки за её пределами всё равно не используются). */
+function parseTimeStringToIndex(raw) {
+  return parseTimeStringWith(raw, findNearestIndexByElapsed);
+}
+
+/** Наибольшая по модулю длительность, которую могут показывать поля
+ *  привязки — длительность уже применённой обрезки. Используется маской
+ *  ввода, чтобы понять, сколько цифр нужно под "минуты" до автопереноса
+ *  курсора за двоеточие. */
+function calibMaxAbsSeconds() {
+  if (!state.trackStats) return 0;
+  const range = computeRangeStats(state.trackStats.points, state.trimStart, state.trimEnd);
+  return range.timeSec || 0;
+}
+
+// ---------- Маска ввода времени (мм:сс / ч:мм:сс) ----------
+//
+// Раньше здесь была только защита от стирания ":" при одиночном Backspace —
+// но при выделении ВСЕГО содержимого поля и удалении/перезаписи это
+// выделение включало и сам разделитель, и защита не срабатывала. Вместо
+// точечных патчей — обычная маска фиксированной ширины (как в полях даты):
+// пользователь всегда редактирует только ЦИФРЫ, разделитель ":" рисуется
+// автоматически по мере заполнения сегментов и никогда не является частью
+// того, что можно ввести/стереть напрямую. Ширина сегмента "минуты" (или
+// "часы", если трек длиннее часа) подбирается под длительность конкретного
+// трека — например, при 12:11 это 2 цифры, и после них курсор сам
+// перескакивает за ":" на секунды.
+
+/** [ширина_первого_сегмента, 2, (2)] — например [2,2] для "мм:сс" или
+ *  [1,2,2] для "ч:мм:сс", в зависимости от того, сколько цифр нужно, чтобы
+ *  выразить максимальную длительность этого поля. */
+function timeMaskSegments(maxAbsSec) {
+  const total = Math.max(0, Math.floor(maxAbsSec || 0));
+  const h = Math.floor(total / 3600);
+  if (h > 0) return [String(h).length, 2, 2];
+  const m = Math.floor(total / 60);
+  return [Math.max(1, String(m).length), 2];
+}
+
+/** Собирает отформатированную строку "12:11" из чистых цифр по сегментам.
+ *  Останавливается, как только очередной сегмент не полностью заполнен —
+ *  значит, дальше по треку пользователь ещё не допечатал, и рисовать
+ *  следующее ":" рано. */
+function formatTimeDigits(digits, segments) {
+  let out = "";
+  let idx = 0;
+  for (let si = 0; si < segments.length; si++) {
+    const len = segments[si];
+    const chunk = digits.slice(idx, idx + len);
+    if (!chunk) break;
+    if (si > 0) out += ":";
+    out += chunk;
+    idx += len;
+    if (chunk.length < len) break;
+  }
+  return out;
+}
+
+/** Сколько цифр (без учёта ":") находится в строке до позиции курсора. */
+function digitIndexAtCaret(value, pos) {
+  let count = 0;
+  for (let i = 0; i < pos && i < value.length; i++) {
+    if (/[0-9]/.test(value[i])) count++;
+  }
+  return count;
+}
+
+/** Вешает на текстовое поле маску времени: редактируются только цифры,
+ *  ":" всегда генерируется автоматически и никогда не может быть стёрт или
+ *  перезаписан напрямую — при заполнении сегмента курсор сам переходит
+ *  за разделитель. getMaxAbsSeconds — функция без аргументов, возвращающая
+ *  актуальную длительность (для конкретного поля она может меняться, если
+ *  трек/обрезка ещё не загружены на момент вызова attachTimeInputMask). */
+function attachTimeInputMask(inputEl, getMaxAbsSeconds) {
+  function segments() {
+    return timeMaskSegments(getMaxAbsSeconds ? getMaxAbsSeconds() : 3599);
+  }
+  function digitsOf(value) {
+    return value.replace(/[^0-9]/g, "");
+  }
+  function caretForDigitCount(digits, segs, count) {
+    return formatTimeDigits(digits.slice(0, count), segs).length;
+  }
+  function apply(digits, caretDigitCount) {
+    const segs = segments();
+    const cap = segs.reduce((a, b) => a + b, 0);
+    digits = digits.slice(0, cap);
+    caretDigitCount = Math.min(caretDigitCount, digits.length);
+    inputEl.value = formatTimeDigits(digits, segs);
+    const pos = caretForDigitCount(digits, segs, caretDigitCount);
+    inputEl.setSelectionRange(pos, pos);
+    // Программное присвоение .value не порождает событие "input" само по
+    // себе — а на него завязаны остальные обработчики (автопереход к точке
+    // трека и т.п.), поэтому рассылаем его вручную.
+    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  inputEl.addEventListener("beforeinput", (e) => {
+    const segs = segments();
+    const cap = segs.reduce((a, b) => a + b, 0);
+    const value = inputEl.value;
+    const selStart = inputEl.selectionStart;
+    const selEnd = inputEl.selectionEnd;
+    const digits = digitsOf(value);
+    const startDigitIdx = digitIndexAtCaret(value, selStart);
+    const endDigitIdx = digitIndexAtCaret(value, selEnd);
+
+    if (
+      e.inputType === "insertText" ||
+      e.inputType === "insertFromPaste" ||
+      e.inputType === "insertFromDrop" ||
+      e.inputType === "insertCompositionText"
+    ) {
+      e.preventDefault();
+      const raw = e.data != null ? e.data : (e.dataTransfer && e.dataTransfer.getData("text")) || "";
+      const insertDigits = raw.replace(/[^0-9]/g, "");
+      if (!insertDigits) return;
+      const before = digits.slice(0, startDigitIdx);
+      const after = digits.slice(endDigitIdx);
+      const merged = (before + insertDigits + after).slice(0, cap);
+      apply(merged, Math.min(before.length + insertDigits.length, cap));
+      return;
+    }
+
+    if (e.inputType === "deleteContentBackward") {
+      e.preventDefault();
+      if (selStart !== selEnd) {
+        apply(digits.slice(0, startDigitIdx) + digits.slice(endDigitIdx), startDigitIdx);
+      } else if (startDigitIdx > 0) {
+        apply(digits.slice(0, startDigitIdx - 1) + digits.slice(startDigitIdx), startDigitIdx - 1);
+      }
+      return;
+    }
+
+    if (e.inputType === "deleteContentForward") {
+      e.preventDefault();
+      if (selStart !== selEnd) {
+        apply(digits.slice(0, startDigitIdx) + digits.slice(endDigitIdx), startDigitIdx);
+      } else if (startDigitIdx < digits.length) {
+        apply(digits.slice(0, startDigitIdx) + digits.slice(startDigitIdx + 1), startDigitIdx);
+      }
+      return;
+    }
+    // Прочие inputType (например, недоступный e.data при вставке через
+    // системное меню на некоторых мобильных клавиатурах) подчищает
+    // fallback ниже, по итоговому value.
+  });
+
+  // Fallback на случай, если beforeinput недоступен/не даёт нужных данных —
+  // просто пересобираем маску из того, что реально оказалось в поле.
+  inputEl.addEventListener("input", () => {
+    const segs = segments();
+    const cap = segs.reduce((a, b) => a + b, 0);
+    const digits = digitsOf(inputEl.value).slice(0, cap);
+    const expected = formatTimeDigits(digits, segs);
+    if (expected !== inputEl.value) {
+      inputEl.value = expected;
+      const pos = expected.length;
+      inputEl.setSelectionRange(pos, pos);
+    }
+  });
 }
 
 /** Текст подписи слайдера для произвольного индекса — без побочных эффектов. */
@@ -618,6 +793,8 @@ el.trackSlider.addEventListener("input", () => {
   selectTrackIndex(Number(el.trackSlider.value));
 });
 
+attachTimeInputMask(el.timeInput, calibMaxAbsSeconds);
+
 // Автопереход при вводе времени вручную — без отдельной кнопки. Ошибки
 // формата тут молча игнорируются (пользователь мог не дописать число).
 el.timeInput.addEventListener("input", () => {
@@ -629,13 +806,18 @@ function commitTimeInput() {
   const idx = parseTimeStringToIndex(el.timeInput.value);
   if (idx === null) {
     showStatus("Неверный формат, используй ММ:СС или Ч:ММ:СС", true);
-    return;
+    return false;
   }
   selectTrackIndex(idx); // переформатирует поле начисто
+  return true;
 }
 
+// Enter в поле времени — это не только выбор точки трека, но и сразу же
+// запуск добавления опорной точки (эквивалент клика по "Добавить опорную
+// точку"): типичный сценарий — вписал время, нажал Enter, кликнул по карте.
 el.timeInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") commitTimeInput();
+  if (e.key !== "Enter") return;
+  if (commitTimeInput()) el.armButton.click();
 });
 
 // ---------- Калибровка (опорные точки) ----------
@@ -654,15 +836,58 @@ el.armButton.addEventListener("click", () => {
     showStatus("Сначала загрузи изображение карты", true);
     return;
   }
+  // Одновременно может быть только один режим ожидания клика по карте —
+  // если была активна перестановка существующей точки, снимаем её.
+  if (state.repositionArmedIndex !== null) {
+    state.repositionArmedIndex = null;
+    renderControlPointList();
+  }
   state.armedForClick = true;
   el.armButton.textContent = "Отмена";
   el.armButton.classList.add("armed");
   updateCanvasCursor();
 });
 
+/** Переключает режим "жду клика по карте, чтобы переставить существующую
+ *  опорную точку №i" — сама точка (время/trackIndex) не меняется, меняется
+ *  только место на карте (target). */
+function toggleRepositionArm(i) {
+  if (!state.mapImage) {
+    showStatus("Сначала загрузи изображение карты", true);
+    return;
+  }
+  if (state.repositionArmedIndex === i) {
+    state.repositionArmedIndex = null;
+  } else {
+    // Отменяем режим добавления новой точки, если он был активен — как и
+    // выше, ждать клика одновременно для двух разных целей нельзя.
+    if (state.armedForClick) {
+      state.armedForClick = false;
+      el.armButton.textContent = "Добавить опорную точку";
+      el.armButton.classList.remove("armed");
+    }
+    state.repositionArmedIndex = i;
+  }
+  updateCanvasCursor();
+  renderControlPointList();
+}
+
 el.canvas.addEventListener("click", (e) => {
   if (suppressNextClick) {
     suppressNextClick = false;
+    return;
+  }
+  if (state.repositionArmedIndex !== null) {
+    const rect = el.canvas.getBoundingClientRect();
+    const canvasPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const cp = state.controlPoints[state.repositionArmedIndex];
+    if (cp) cp.target = canvasToImg(canvasPt);
+    state.repositionArmedIndex = null;
+    updateCanvasCursor();
+    recomputeModel();
+    updateCalibPanel();
+    render();
+    showStatus("Опорная точка переставлена");
     return;
   }
   if (!state.armedForClick) {
@@ -699,6 +924,7 @@ el.canvas.addEventListener("click", (e) => {
 
 el.undoButton.addEventListener("click", () => {
   state.controlPoints.pop();
+  state.repositionArmedIndex = null;
   recomputeModel();
   updateCalibPanel();
   render();
@@ -707,6 +933,7 @@ el.undoButton.addEventListener("click", () => {
 el.clearCalibButton.addEventListener("click", () => {
   state.controlPoints = [];
   state.model = null;
+  state.repositionArmedIndex = null;
   updateCalibPanel();
   render();
 });
@@ -723,6 +950,7 @@ function recomputeModel() {
 
 function removeControlPoint(index) {
   state.controlPoints.splice(index, 1);
+  state.repositionArmedIndex = null; // индексы сдвинулись — снимаем режим перестановки, если был активен
   recomputeModel();
   updateCalibPanel();
   render();
@@ -741,7 +969,8 @@ function retimeControlPoint(index, raw) {
   const newPoint = state.trackStats.points[newIdx];
   cp.trackIndex = newIdx;
   cp.source = state.projection.toMeters(newPoint.lat, newPoint.lon);
-  sortControlPoints();
+  sortControlPoints(); // порядок в массиве может измениться — снимаем режим перестановки, если был активен
+  state.repositionArmedIndex = null;
   recomputeModel();
   updateCalibPanel();
   render();
@@ -791,16 +1020,62 @@ el.widthValue.textContent = `${state.routeWidth} px`;
 // Трек не удаляется из данных — просто trimStart/trimEnd задают ПРИМЕНЁННЫЙ
 // диапазон индексов, который учитывается при отрисовке линии (drawRoute),
 // подсчёте статистики (updateStatsPanel) и как точка отсчёта времени
-// (elapsedSeconds). Пока пользователь двигает слайдеры/вводит время вручную,
-// меняется только ЧЕРНОВИК (trimStartDraft/trimEndDraft) — карта, статистика
-// и список опорных точек не трогаются. Реальное применение (включая
-// удаление опорных точек, оказавшихся за пределами нового диапазона) —
-// только по кнопке "Применить".
+// (elapsedSeconds). Раньше это была постоянная панель в сайдбаре; теперь —
+// модалка, которая сама открывается сразу после загрузки файла трека
+// (см. handleTrackFile), плюс кнопка "Изменить обрезку" в панели "Трек"
+// (el.editTrimButton), чтобы вернуться к этому позже. Пока модалка открыта,
+// изменения слайдеров/полей живут только в ЧЕРНОВИКЕ (trimStartDraft/
+// trimEndDraft) — карта, статистика и список опорных точек не трогаются,
+// пока не нажата "Применить".
+
+/** Время в модалке обрезки всегда считается от самого начала ЗАПИСИ трека
+ *  (индекс 0), а НЕ от уже применённого trimStart. Если считать от
+ *  trimStart (как в панели "Привязка"), то при повторном открытии "Изменить
+ *  обрезку" всё, что раньше прежнего начала, показывалось бы со знаком
+ *  минус — хотя пользователь просто выбирает новую обрезку заново, как в
+ *  первый раз, и минус тут не при чём. */
+function trimElapsedSeconds(index) {
+  const pts = state.trackStats.points;
+  const origin = pts[0];
+  const p = pts[index];
+  if (!origin.time || !p.time) return null;
+  return (p.time - origin.time) / 1000;
+}
 
 function trimTimeLabel(idx) {
   const p = state.trackStats.points[idx];
   if (!p.time) return `№${idx}`;
-  return formatElapsed(elapsedSeconds(idx));
+  return formatElapsed(trimElapsedSeconds(idx));
+}
+
+function findNearestIndexByTrimElapsed(targetSec) {
+  const pts = state.trackStats.points;
+  const origin = pts[0];
+  let bestIdx = 0;
+  let bestDiff = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    if (!pts[i].time || !origin.time) continue;
+    const diff = Math.abs((pts[i].time - origin.time) / 1000 - targetSec);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+/** Парсинг времени для полей модалки обрезки — ищет по ВСЕМУ треку (не
+ *  только внутри текущей применённой обрезки), т.к. слайдеры обрезки и так
+ *  позволяют выбрать любую точку от начала до конца записи. */
+function parseTrimTimeStringToIndex(raw) {
+  return parseTimeStringWith(raw, findNearestIndexByTrimElapsed);
+}
+
+/** Длительность всего трека — по ней подбирается ширина маски ввода для
+ *  полей модалки обрезки (она работает по всей записи, а не по применённой
+ *  обрезке). */
+function trimModalMaxAbsSeconds() {
+  return (state.trackStats && state.trackStats.totalTimeSec) || 0;
 }
 
 /** Опорные точки, оказавшиеся за пределами [trimStart, trimEnd] после
@@ -813,6 +1088,7 @@ function pruneControlPointsOutsideTrim() {
   );
   const removed = before - state.controlPoints.length;
   if (removed > 0) {
+    state.repositionArmedIndex = null; // индексы точек могли сдвинуться
     recomputeModel();
     showStatus(
       removed === 1
@@ -822,119 +1098,140 @@ function pruneControlPointsOutsideTrim() {
   }
 }
 
-/** Кнопка "Применить" активна только когда черновик отличается от того, что
- *  уже применено — так видно, есть ли несохранённые изменения. */
-function refreshTrimApplyState() {
-  const dirty = state.trimStartDraft !== state.trimStart || state.trimEndDraft !== state.trimEnd;
-  el.trimApplyButton.disabled = !dirty;
-  el.trimApplyButton.classList.toggle("armed", dirty);
-}
-
-/** Полная пересинхронизация панели с текущим черновиком — слайдеры, подписи
+/** Пересинхронизация модалки с текущим черновиком — слайдеры, подписи
  *  и текстовые поля времени. Не трогает применённую обрезку. */
-function syncTrimDraftUI() {
-  el.trimStartSlider.value = state.trimStartDraft;
-  el.trimEndSlider.value = state.trimEndDraft;
-  el.trimStartValue.textContent = trimTimeLabel(state.trimStartDraft);
-  el.trimEndValue.textContent = trimTimeLabel(state.trimEndDraft);
-  el.trimStartInput.value = trimTimeLabel(state.trimStartDraft);
-  el.trimEndInput.value = trimTimeLabel(state.trimEndDraft);
-  refreshTrimApplyState();
+function syncTrimModalUI() {
+  el.trimModalStartSlider.value = state.trimStartDraft;
+  el.trimModalEndSlider.value = state.trimEndDraft;
+  el.trimModalStartValue.textContent = trimTimeLabel(state.trimStartDraft);
+  el.trimModalEndValue.textContent = trimTimeLabel(state.trimEndDraft);
+  el.trimModalStartInput.value = trimTimeLabel(state.trimStartDraft);
+  el.trimModalEndInput.value = trimTimeLabel(state.trimEndDraft);
 }
 
-function updateTrimPanel() {
-  if (!state.trackStats) {
-    el.trimPanel.classList.add("hidden");
-    return;
-  }
-  el.trimPanel.classList.remove("hidden");
+/** Открывает модалку обрезки: черновик стартует от уже ПРИМЕНЁННОЙ обрезки
+ *  (при первой загрузке трека это весь трек целиком, при повторном вызове
+ *  через "Изменить обрезку" — то, что применили в прошлый раз). */
+function openTrimModal() {
+  if (!state.trackStats) return;
   const maxIdx = state.trackStats.points.length - 1;
-  el.trimStartSlider.min = 0;
-  el.trimStartSlider.max = maxIdx;
-  el.trimEndSlider.min = 0;
-  el.trimEndSlider.max = maxIdx;
-  syncTrimDraftUI();
+  state.trimStartDraft = state.trimStart;
+  state.trimEndDraft = state.trimEnd;
+  el.trimModalStartSlider.min = 0;
+  el.trimModalStartSlider.max = maxIdx;
+  el.trimModalEndSlider.min = 0;
+  el.trimModalEndSlider.max = maxIdx;
+  syncTrimModalUI();
+  el.trimModal.classList.remove("hidden");
 }
 
-el.trimStartSlider.addEventListener("input", () => {
-  let v = Number(el.trimStartSlider.value);
+function closeTrimModal() {
+  el.trimModal.classList.add("hidden");
+}
+
+/** Применяет текущий черновик как новую обрезку и закрывает модалку. */
+function applyTrimFromModal() {
+  state.trimStart = state.trimStartDraft;
+  state.trimEnd = state.trimEndDraft;
+  pruneControlPointsOutsideTrim(); // точки вне диапазона пропадают именно здесь, не раньше
+  // Выбранная точка трека (индикатор/слайдер привязки) должна оставаться
+  // внутри применённого диапазона — иначе она может оказаться ДО нового
+  // trimStart и показывать отрицательное время (например "-1:00"), хотя
+  // пользователь только что специально сдвинул начало отсчёта на эту точку.
+  state.selectedTrackIndex = Math.min(
+    Math.max(state.selectedTrackIndex, state.trimStart),
+    state.trimEnd
+  );
+  if (state.hoverTrackIndex !== null) {
+    state.hoverTrackIndex = Math.min(
+      Math.max(state.hoverTrackIndex, state.trimStart),
+      state.trimEnd
+    );
+  }
+  updateStatsPanel();
+  updateCalibPanel(); // все времена (слайдер, список опорных точек) теперь отсчитываются от нового trimStart
+  render();
+  showStatus("Обрезка применена");
+  closeTrimModal();
+}
+
+el.trimModalStartSlider.addEventListener("input", () => {
+  let v = Number(el.trimModalStartSlider.value);
   v = Math.min(v, state.trimEndDraft - 1 >= 0 ? state.trimEndDraft - 1 : 0);
   state.trimStartDraft = Math.max(0, v);
-  syncTrimDraftUI();
+  syncTrimModalUI();
 });
 
-el.trimEndSlider.addEventListener("input", () => {
+el.trimModalEndSlider.addEventListener("input", () => {
   const maxIdx = state.trackStats.points.length - 1;
-  let v = Number(el.trimEndSlider.value);
+  let v = Number(el.trimModalEndSlider.value);
   v = Math.max(v, state.trimStartDraft + 1 <= maxIdx ? state.trimStartDraft + 1 : maxIdx);
   state.trimEndDraft = Math.min(maxIdx, v);
-  syncTrimDraftUI();
+  syncTrimModalUI();
 });
 
 /** Ручной ввод времени начала обрезки (черновик). Клон логики timeInput/
  *  cp-time-input: парсим по мере ввода, но само поле не перезаписываем,
  *  чтобы не сбивать то, что печатает пользователь. */
-function setTrimStartDraftFromInput() {
-  const idx = parseTimeStringToIndex(el.trimStartInput.value);
-  if (idx === null) return;
+function setTrimStartDraftFromInput({ reportError = false } = {}) {
+  const idx = parseTrimTimeStringToIndex(el.trimModalStartInput.value);
+  if (idx === null) {
+    if (reportError) showStatus("Неверный формат, используй ММ:СС или Ч:ММ:СС", true);
+    return;
+  }
   const maxAllowed = state.trimEndDraft - 1 >= 0 ? state.trimEndDraft - 1 : 0;
   state.trimStartDraft = Math.max(0, Math.min(idx, maxAllowed));
-  el.trimStartSlider.value = state.trimStartDraft;
-  el.trimStartValue.textContent = trimTimeLabel(state.trimStartDraft);
-  refreshTrimApplyState();
+  el.trimModalStartSlider.value = state.trimStartDraft;
+  el.trimModalStartValue.textContent = trimTimeLabel(state.trimStartDraft);
 }
 
-function setTrimEndDraftFromInput() {
-  const idx = parseTimeStringToIndex(el.trimEndInput.value);
-  if (idx === null) return;
+function setTrimEndDraftFromInput({ reportError = false } = {}) {
+  const idx = parseTrimTimeStringToIndex(el.trimModalEndInput.value);
+  if (idx === null) {
+    if (reportError) showStatus("Неверный формат, используй ММ:СС или Ч:ММ:СС", true);
+    return;
+  }
   const maxIdx = state.trackStats.points.length - 1;
   const minAllowed = state.trimStartDraft + 1 <= maxIdx ? state.trimStartDraft + 1 : maxIdx;
   state.trimEndDraft = Math.min(maxIdx, Math.max(idx, minAllowed));
-  el.trimEndSlider.value = state.trimEndDraft;
-  el.trimEndValue.textContent = trimTimeLabel(state.trimEndDraft);
-  refreshTrimApplyState();
+  el.trimModalEndSlider.value = state.trimEndDraft;
+  el.trimModalEndValue.textContent = trimTimeLabel(state.trimEndDraft);
 }
 
-el.trimStartInput.addEventListener("input", setTrimStartDraftFromInput);
-el.trimStartInput.addEventListener("keydown", (e) => {
+attachTimeInputMask(el.trimModalStartInput, trimModalMaxAbsSeconds);
+attachTimeInputMask(el.trimModalEndInput, trimModalMaxAbsSeconds);
+
+el.trimModalStartInput.addEventListener("input", () => setTrimStartDraftFromInput());
+el.trimModalStartInput.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
-  setTrimStartDraftFromInput();
-  el.trimStartInput.value = trimTimeLabel(state.trimStartDraft); // переформатировать начисто
-  el.trimStartInput.blur();
+  setTrimStartDraftFromInput({ reportError: true });
+  el.trimModalStartInput.value = trimTimeLabel(state.trimStartDraft); // переформатировать начисто
+  el.trimModalStartInput.blur();
 });
 
-el.trimEndInput.addEventListener("input", setTrimEndDraftFromInput);
-el.trimEndInput.addEventListener("keydown", (e) => {
+el.trimModalEndInput.addEventListener("input", () => setTrimEndDraftFromInput());
+el.trimModalEndInput.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
-  setTrimEndDraftFromInput();
-  el.trimEndInput.value = trimTimeLabel(state.trimEndDraft);
-  el.trimEndInput.blur();
+  setTrimEndDraftFromInput({ reportError: true });
+  el.trimModalEndInput.value = trimTimeLabel(state.trimEndDraft);
+  el.trimModalEndInput.blur();
 });
 
-el.trimApplyButton.addEventListener("click", () => {
-  if (!state.trackStats) return;
-  state.trimStart = state.trimStartDraft;
-  state.trimEnd = state.trimEndDraft;
-  pruneControlPointsOutsideTrim(); // точки вне диапазона пропадают именно здесь, не раньше
-  updateStatsPanel();
-  updateCalibPanel(); // все времена (слайдер, список опорных точек) теперь отсчитываются от нового trimStart
-  updateTrimPanel(); // пересинхронизировать панель — подписи пересчитаются относительно нового начала
-  render();
-  showStatus("Обрезка применена");
+el.trimModalApplyButton.addEventListener("click", applyTrimFromModal);
+
+// Клик по затемнённому фону или Escape — просто закрывают модалку, ничего
+// не применяя (при первой загрузке трек и так уже показан целиком).
+el.trimModal.addEventListener("click", (e) => {
+  if (e.target === el.trimModal) closeTrimModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el.trimModal.classList.contains("hidden")) {
+    closeTrimModal();
+  }
 });
 
-el.trimResetButton.addEventListener("click", () => {
-  if (!state.trackStats) return;
-  const maxIdx = state.trackStats.points.length - 1;
-  state.trimStart = 0;
-  state.trimEnd = maxIdx;
-  state.trimStartDraft = 0;
-  state.trimEndDraft = maxIdx;
-  updateStatsPanel();
-  updateCalibPanel(); // сброс обрезки тоже сдвигает точку отсчёта времени обратно к 0
-  updateTrimPanel();
-  render();
-});
+el.editTrimButton.addEventListener("click", openTrimModal);
+
 
 // ---------- Сворачиваемые панели (общая логика для всех .collapsible) ----------
 
@@ -1005,7 +1302,7 @@ function findNearestTrackIndexByCanvasPoint(canvasPt) {
   const pts = state.trackStats.points;
   let bestIdx = null;
   let bestDist2 = Infinity;
-  for (let i = 0; i < pts.length; i++) {
+  for (let i = state.trimStart; i <= state.trimEnd; i++) {
     const proj = imgToCanvas(projectTrackPoint(i));
     const dx = proj.x - canvasPt.x;
     const dy = proj.y - canvasPt.y;
@@ -1023,7 +1320,7 @@ function findNearestTrackIndexByCanvasPoint(canvasPt) {
 let hoverRAFPending = false;
 
 el.canvas.addEventListener("mousemove", (e) => {
-  if (!state.model || !state.trackStats || state.armedForClick) return;
+  if (!state.model || !state.trackStats || state.armedForClick || state.repositionArmedIndex !== null) return;
   if (hoverRAFPending) return;
   hoverRAFPending = true;
   requestAnimationFrame(() => {
@@ -1064,7 +1361,7 @@ let suppressNextClick = false;
 function updateCanvasCursor() {
   if (isPanning) {
     el.canvas.style.cursor = "grabbing";
-  } else if (state.armedForClick || state.hoverTrackIndex !== null) {
+  } else if (state.armedForClick || state.repositionArmedIndex !== null || state.hoverTrackIndex !== null) {
     el.canvas.style.cursor = "crosshair";
   } else {
     el.canvas.style.cursor = "grab";
@@ -1072,7 +1369,7 @@ function updateCanvasCursor() {
 }
 
 el.canvas.addEventListener("mousedown", (e) => {
-  if (e.button !== 0 || state.armedForClick || state.hoverTrackIndex !== null) return;
+  if (e.button !== 0 || state.armedForClick || state.repositionArmedIndex !== null || state.hoverTrackIndex !== null) return;
   isPanning = true;
   panDragged = false;
   panStartX = e.clientX;
@@ -1102,6 +1399,13 @@ window.addEventListener("mouseup", () => {
 
 // ---------- UI обновление ----------
 
+/** Панель "Темп" осмысленна только когда трек уже спроецирован на карту —
+ *  то есть загружены и карта, и трек. До этого её показывать нечего. */
+function updateLegendPanelVisibility() {
+  const ready = !!(state.mapImage && state.trackStats);
+  el.legendPanel.classList.toggle("hidden", !ready);
+}
+
 function updateStatsPanel() {
   if (!state.trackStats) {
     el.statsPanel.classList.add("hidden");
@@ -1120,7 +1424,12 @@ function updateCalibPanel() {
     return;
   }
   el.calibPanel.classList.remove("hidden");
-  el.trackSlider.max = state.trackStats.points.length - 1;
+  // Точки вне [trimStart, trimEnd] не рисуются и не участвуют в статистике,
+  // поэтому и выбор точки трека для привязки должен быть ограничен этим же
+  // диапазоном — иначе слайдер позволяет выбрать точку "до старта" и время
+  // показывается отрицательным относительно нового trimStart.
+  el.trackSlider.min = state.trimStart;
+  el.trackSlider.max = state.trimEnd;
   el.trackSlider.value = state.selectedTrackIndex;
 
   const hasTime = !!state.trackStats.points[0].time;
@@ -1150,6 +1459,7 @@ function renderControlPointList() {
     timeInput.className = "cp-time-input";
     timeInput.value = elapsedLabel(cp.trackIndex) ?? `#${cp.trackIndex}`;
     timeInput.disabled = !state.trackStats.points[0].time;
+    attachTimeInputMask(timeInput, calibMaxAbsSeconds);
     const commit = () => retimeControlPoint(i, timeInput.value);
     timeInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") timeInput.blur();
@@ -1157,7 +1467,27 @@ function renderControlPointList() {
     timeInput.addEventListener("blur", commit);
     li.appendChild(timeInput);
 
+    const moveBtn = document.createElement("button");
+    moveBtn.type = "button";
+    moveBtn.className = "cp-move-btn";
+    moveBtn.title = "Переставить точку на карте";
+    moveBtn.setAttribute("aria-label", "Переставить точку на карте");
+    moveBtn.classList.toggle("armed", state.repositionArmedIndex === i);
+    moveBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<polyline points="5 9 2 12 5 15"></polyline>' +
+      '<polyline points="9 5 12 2 15 5"></polyline>' +
+      '<polyline points="15 19 12 22 9 19"></polyline>' +
+      '<polyline points="19 9 22 12 19 15"></polyline>' +
+      '<line x1="2" y1="12" x2="22" y2="12"></line>' +
+      '<line x1="12" y1="2" x2="12" y2="22"></line>' +
+      "</svg>";
+    moveBtn.addEventListener("click", () => toggleRepositionArm(i));
+    li.appendChild(moveBtn);
+
     const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cp-delete-btn";
     btn.textContent = "✕";
     btn.title = "Удалить точку";
     btn.addEventListener("click", () => removeControlPoint(i));
