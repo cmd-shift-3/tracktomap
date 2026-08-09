@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TrackToMap</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body class="no-map">
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-icon" viewBox="12 14 48 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path class="map-outline" d="M14 22 L28 16 L42 22 L56 16 L56 50 L42 56 L28 50 L14 56 Z" fill="none" stroke-width="3" stroke-linejoin="round"/>
+      <line class="map-fold" x1="28" y1="16" x2="28" y2="50" stroke-width="1.4" stroke-dasharray="2 3"/>
+      <line class="map-fold" x1="42" y1="22" x2="42" y2="56" stroke-width="1.4" stroke-dasharray="2 3"/>
+      <path class="route-line" d="M19 46 Q24 41 28 42" fill="none" stroke-width="6" stroke-linecap="round"/>
+      <path class="route-line" d="M28 42 Q34 43 42 34" fill="none" stroke-width="6" stroke-linecap="round"/>
+      <path class="route-line" d="M42 34 Q46 30 51 27" fill="none" stroke-width="6" stroke-linecap="round"/>
+      <circle class="hinge-dot" cx="28" cy="42" r="3.2"/>
+      <circle class="hinge-dot" cx="42" cy="34" r="3.2"/>
+    </svg>
+    <span class="brand-name">TrackToMap</span>
+  </div>
+  <div class="topbar-right">
+    <button id="themeToggleButton" class="theme-toggle" type="button" aria-label="Переключить тему" title="Переключить тему">
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 2.5V5M12 19V21.5M4.2 4.2L6 6M18 18L19.8 19.8M2.5 12H5M19 12H21.5M4.2 19.8L6 18M18 6L19.8 4.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5Z" fill="currentColor"/>
+      </svg>
+    </button>
+    <div class="topbar-actions">
+      <label class="file-btn">
+        Карта (JPG/PNG)
+        <input type="file" id="mapInput" accept="image/*" hidden />
+      </label>
+      <label class="file-btn">
+        Трек (GPX/TCX)
+        <input type="file" id="trackInput" accept=".gpx,.tcx,application/gpx+xml" hidden />
+      </label>
+      <button id="exportButton" class="file-btn primary">Экспорт PNG</button>
+    </div>
+  </div>
+</header>
+
+<main class="layout no-map" id="layoutMain">
+  <aside class="sidebar">
+
+    <section id="statsPanel" class="panel hidden collapsible">
+      <button type="button" id="statsToggleButton" class="panel-toggle" aria-expanded="true">
+        <h2>Трек</h2>
+        <span class="chevron">▾</span>
+      </button>
+      <div class="panel-collapse">
+        <div class="panel-collapse-inner">
+          <dl class="stat-list">
+            <div class="stat-row"><dt>Дистанция</dt><dd id="statDistance">—</dd></div>
+            <div class="stat-row"><dt>Время</dt><dd id="statDuration">—</dd></div>
+            <div class="stat-row"><dt>Средний темп</dt><dd id="statPace">—</dd></div>
+          </dl>
+        </div>
+      </div>
+    </section>
+
+    <section id="trimPanel" class="panel hidden collapsible collapsed">
+      <button type="button" id="trimToggleButton" class="panel-toggle" aria-expanded="false">
+        <h2>Обрезка трека</h2>
+        <span class="chevron">▾</span>
+      </button>
+      <div class="panel-collapse">
+        <div class="panel-collapse-inner">
+          <div class="slider-field">
+            <label class="field-label" for="trimStartSlider">Начало <span id="trimStartValue" class="field-value">—</span></label>
+            <input type="range" id="trimStartSlider" min="0" max="100" value="0" />
+          </div>
+          <div class="time-input-row">
+            <input type="text" id="trimStartInput" placeholder="напр. 0:00" />
+          </div>
+          <div class="slider-field">
+            <label class="field-label" for="trimEndSlider">Конец <span id="trimEndValue" class="field-value">—</span></label>
+            <input type="range" id="trimEndSlider" min="0" max="100" value="100" />
+          </div>
+          <div class="time-input-row">
+            <input type="text" id="trimEndInput" placeholder="напр. 45:00" />
+          </div>
+          <p class="hint" style="margin: 2px 0 12px;">Изменения не влияют на карту и опорные точки, пока не нажата «Применить».</p>
+          <div class="calib-actions">
+            <button id="trimApplyButton" class="btn" type="button" disabled>Применить</button>
+            <button id="trimResetButton" class="btn ghost" type="button">Сбросить</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="zoomPanel" class="panel hidden collapsible">
+      <button type="button" id="zoomToggleButton" class="panel-toggle" aria-expanded="true">
+        <h2>Масштаб карты</h2>
+        <span class="chevron">▾</span>
+      </button>
+      <div class="panel-collapse">
+        <div class="panel-collapse-inner">
+          <div class="slider-field">
+            <label class="field-label" for="zoomSlider">Масштаб <span id="zoomValue" class="field-value">100%</span></label>
+            <input type="range" id="zoomSlider" min="50" max="400" step="10" value="100" />
+          </div>
+          <button id="zoomResetButton" class="btn ghost small" type="button">Сбросить (по размеру окна)</button>
+          <p class="hint" style="margin: 10px 0 0;">Ctrl/Cmd + колесо мыши — зум по карте. Обычная прокрутка — перемещение по карте.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="calibPanel" class="panel hidden collapsible">
+      <button type="button" id="calibToggleButton" class="panel-toggle" aria-expanded="true">
+        <h2>Привязка</h2>
+        <span class="chevron">▾</span>
+      </button>
+      <div class="panel-collapse">
+        <div class="panel-collapse-inner">
+          <label class="field-label" for="trackSlider">Точка трека</label>
+          <input type="range" id="trackSlider" min="0" max="100" value="0" />
+          <div id="trackSliderLabel" class="slider-label">0%</div>
+
+          <label class="field-label" for="timeInput">Или введи время вручную</label>
+          <div class="time-input-row">
+            <input type="text" id="timeInput" placeholder="напр. 3:45" />
+          </div>
+
+          <button id="armButton" class="btn">Добавить опорную точку</button>
+
+          <ul id="controlPointList" class="control-point-list"></ul>
+
+          <div class="calib-actions">
+            <button id="undoButton" class="btn ghost" disabled>Отменить</button>
+            <button id="clearCalibButton" class="btn ghost" disabled>Очистить всё</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="legendPanel" class="panel legend collapsible collapsed">
+      <button type="button" id="legendToggleButton" class="panel-toggle" aria-expanded="false">
+        <h2>Темп</h2>
+        <span class="chevron">▾</span>
+      </button>
+      <div class="panel-collapse">
+        <div class="panel-collapse-inner">
+          <div id="legendGradient" class="legend-gradient"></div>
+          <div class="legend-color-row">
+            <label class="color-field">
+              <input type="color" id="colorFast" value="#22c55e" />
+              <span>быстро</span>
+            </label>
+            <label class="color-field">
+              <input type="color" id="colorSlow" value="#ef4444" />
+              <span>медленно</span>
+            </label>
+          </div>
+
+          <div class="slider-field">
+            <label class="field-label" for="opacitySlider">Прозрачность линии <span id="opacityValue" class="field-value">70%</span></label>
+            <input type="range" id="opacitySlider" min="10" max="100" step="5" value="70" />
+          </div>
+          <div class="slider-field">
+            <label class="field-label" for="widthSlider">Толщина линии <span id="widthValue" class="field-value">4 px</span></label>
+            <input type="range" id="widthSlider" min="1" max="14" step="1" value="4" />
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </aside>
+
+  <section class="canvas-area" id="canvasArea">
+    <div id="canvasWrap" class="canvas-wrap">
+      <canvas id="canvas"></canvas>
+      <div id="emptyState" class="empty-state">
+        <p class="empty-title">Перетащи сюда файлы, чтобы начать</p>
+        <p class="empty-hint">карта — JPG/PNG, трек — GPX/TCX</p>
+        <div class="empty-actions">
+          <label class="file-btn primary">
+            Карта (JPG/PNG)
+            <input type="file" id="emptyMapInput" accept="image/*" hidden />
+          </label>
+          <label class="file-btn">
+            Трек (GPX/TCX)
+            <input type="file" id="emptyTrackInput" accept=".gpx,.tcx,application/gpx+xml" hidden />
+          </label>
+        </div>
+      </div>
+    </div>
+    <p id="statusMsg" class="status-msg"></p>
+  </section>
+</main>
+
+<script src="js/geo.js"></script>
+<script src="js/transform.js"></script>
+<script src="js/gpx-parser.js"></script>
+<script src="js/track.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
