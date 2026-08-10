@@ -1,7 +1,7 @@
 // app.js — состояние приложения, отрисовка на canvas, обработка UI.
 
 const CONTROL_POINT_COLOR = "#facc15"; // жёлтый — хорошо читается почти на любом фоне карты
-const CURRENT_POINT_COLOR = "#38bdf8";
+const CURRENT_POINT_COLOR = "#f2b8b5";
 const MARKER_OUTLINE_COLOR = "#000000";
 const MARKER_OUTLINE_WIDTH = 0.6; // очень тонкая, но заметная чёрная оконтовка
 
@@ -16,11 +16,14 @@ const state = {
   trackStats: null, // computeTrackStats(...)
   projection: null, // makeProjection(...)
   controlPoints: [], // [{ trackIndex, source:{x,y}m, target:{x,y}imgPx }], всегда отсортирован по trackIndex
+  history: [], // стек снимков controlPoints ДО каждого изменяющего действия — для "Отменить" (предыдущий шаг)
+  future: [], // стек снимков, снятых через "Отменить" — для "Повторить" (следующий шаг)
   model: null, // buildSegmentedModel(controlPoints): { segments }
   armedForClick: false, // ждём клика по карте для новой опорной точки
   repositionArmedIndex: null, // индекс опорной точки, для которой ждём клика по карте, чтобы переставить её место
   selectedTrackIndex: 0,
   hoverTrackIndex: null, // точка трека под курсором мыши (предпросмотр перед фиксацией кликом)
+  pulseAnimation: null, // { index, startTime } — анимация-пульс при активации привязки двойным кликом
   paceColorFast: "#22c55e",
   paceColorSlow: "#ef4444",
   routeOpacity: 0.7,
@@ -52,6 +55,7 @@ const el = {
   controlPointList: document.getElementById("controlPointList"),
   exportButton: document.getElementById("exportButton"),
   undoButton: document.getElementById("undoButton"),
+  redoButton: document.getElementById("redoButton"),
   clearCalibButton: document.getElementById("clearCalibButton"),
   statusMsg: document.getElementById("statusMsg"),
   legendPanel: document.getElementById("legendPanel"),
@@ -196,6 +200,7 @@ async function handleTrackFile(file) {
     state.trackStats = computeTrackStats(points);
     state.projection = makeProjection(points[0].lat, points[0].lon);
     state.controlPoints = [];
+    resetControlPointHistory();
     state.model = null;
     state.selectedTrackIndex = 0;
     state.trimStart = 0;
@@ -371,6 +376,7 @@ function render() {
   drawRoute();
   drawControlPoints();
   drawCurrentIndicator();
+  drawArmPulse();
 }
 
 function imgToCanvas(pt) {
@@ -490,14 +496,14 @@ function drawControlPoints() {
     ctx.stroke();
 
     const label = controlPointLabel(i, total);
-    ctx.font = "bold 10px system-ui, sans-serif";
+    ctx.font = "bold 16px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.lineWidth = MARKER_OUTLINE_WIDTH * 2;
+    ctx.lineWidth = MARKER_OUTLINE_WIDTH * 4.5;
     ctx.strokeStyle = MARKER_OUTLINE_COLOR;
-    ctx.strokeText(label, pt.x, pt.y - 12);
+    ctx.strokeText(label, pt.x, pt.y - 16);
     ctx.fillStyle = CONTROL_POINT_COLOR;
-    ctx.fillText(label, pt.x, pt.y - 12);
+    ctx.fillText(label, pt.x, pt.y - 16);
   });
 }
 
@@ -511,23 +517,97 @@ function drawCurrentIndicator() {
 
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, 10, 0, Math.PI * 2);
-  ctx.fillStyle = "rgba(56, 189, 248, 0.25)";
+  ctx.fillStyle = "rgba(242, 184, 181, 0.22)";
   ctx.fill();
 
   ctx.beginPath();
   ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
   ctx.fillStyle = CURRENT_POINT_COLOR;
   ctx.fill();
+  // Тонкая чёрная обводка вокруг самой точки — без неё светлый оттенок
+  // теряется на светлых участках карты.
+  ctx.lineWidth = MARKER_OUTLINE_WIDTH * 1.25;
+  ctx.strokeStyle = MARKER_OUTLINE_COLOR;
+  ctx.stroke();
 
   const label = elapsedLabel(idx) ?? `№${idx}`;
-  ctx.font = "bold 10px system-ui, sans-serif";
+  ctx.font = "bold 16px system-ui, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.lineWidth = MARKER_OUTLINE_WIDTH * 2;
+  // Обводка подписи заметно толще, чем у опорных точек — иначе цифры на
+  // светлом фоне карты сливаются со светлым цветом текущей точки.
+  ctx.lineWidth = MARKER_OUTLINE_WIDTH * 4.5;
   ctx.strokeStyle = MARKER_OUTLINE_COLOR;
   ctx.strokeText(label, pt.x, pt.y - 16);
   ctx.fillStyle = CURRENT_POINT_COLOR;
   ctx.fillText(label, pt.x, pt.y - 16);
+}
+
+const ARM_PULSE_COLOR = CURRENT_POINT_COLOR; // красный — тот же, что у индикатора текущей точки
+const ARM_PULSE_DURATION_MS = 900;
+const ARM_PULSE_RING_DELAYS = [0, 160]; // мс — вторая волна догоняет первую, эффект "ряби"
+
+function easeOutCubic(t) {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+/** Короткая анимация-пульс на точке трека, которую только что "привязали"
+ *  двойным кликом (см. обработчик dblclick ниже) — подтверждает, какая
+ *  именно точка включила режим добавления опорной точки. Две красных волны
+ *  с небольшим сдвигом по времени ("рябь") расходятся с ease-out
+ *  затуханием, а в центре на миг вспыхивает мягкое свечение — вместо
+ *  прежнего одного линейно затухающего жёлтого кольца.
+ */
+function drawArmPulse() {
+  if (!state.pulseAnimation || !state.model || !state.trackStats) return;
+  const { index, startTime } = state.pulseAnimation;
+  const elapsed = performance.now() - startTime;
+  if (elapsed > ARM_PULSE_DURATION_MS) return;
+  const pt = imgToCanvas(projectTrackPoint(index));
+  const rgb = hexToRgb(ARM_PULSE_COLOR);
+
+  ARM_PULSE_RING_DELAYS.forEach((delay) => {
+    const span = ARM_PULSE_DURATION_MS - delay;
+    const t = (elapsed - delay) / span;
+    if (t < 0 || t > 1) return;
+    const eased = easeOutCubic(t);
+    const radius = 7 + eased * 30;
+    const alpha = (1 - eased) * 0.85;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+    ctx.lineWidth = 2.5 * (1 - eased * 0.6); // кольцо слегка утончается по мере расширения
+    ctx.stroke();
+  });
+
+  // Мягкая вспышка в центре, гаснущая быстрее колец — подчёркивает момент
+  // активации, а не просто дублирует расширяющиеся кольца.
+  const glowT = Math.min(1, elapsed / (ARM_PULSE_DURATION_MS * 0.4));
+  const glowAlpha = (1 - easeOutCubic(glowT)) * 0.4;
+  if (glowAlpha > 0.01) {
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 9, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${glowAlpha})`;
+    ctx.fill();
+  }
+}
+
+/** Запускает пульс и перерисовывает канвас на каждом кадре, пока анимация
+ *  не закончится. */
+function startArmPulse(index) {
+  state.pulseAnimation = { index, startTime: performance.now() };
+  const step = () => {
+    if (!state.pulseAnimation || state.pulseAnimation.index !== index) return;
+    const elapsed = performance.now() - state.pulseAnimation.startTime;
+    if (elapsed > ARM_PULSE_DURATION_MS) {
+      state.pulseAnimation = null;
+      render();
+      return;
+    }
+    render();
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 // ---------- Время: всегда "от старта обрезки" ----------
@@ -611,7 +691,8 @@ function parseTimeStringWith(raw, resolveIndex) {
  *  всегда отсчитывается от ПРИМЕНЁННОГО trimStart и ищется только внутри
  *  применённой обрезки (точки за её пределами всё равно не используются). */
 function parseTimeStringToIndex(raw) {
-  return parseTimeStringWith(raw, findNearestIndexByElapsed);
+  const sec = maskedInputToSeconds(raw, calibMaxAbsSeconds());
+  return sec === null ? null : findNearestIndexByElapsed(sec);
 }
 
 /** Наибольшая по модулю длительность, которую могут показывать поля
@@ -648,6 +729,53 @@ function timeMaskSegments(maxAbsSec) {
   return [Math.max(1, String(m).length), 2];
 }
 
+/** Переводит "голые" цифры маски (без ":") в секунды по тем же сегментам,
+ *  что и formatTimeDigits: первый сегмент — минуты (или часы, если сегментов
+ *  три), последний — всегда секунды. Недописанный ПОСЛЕДНИЙ сегмент читается
+ *  как обычное число ("1" в сегменте секунд — это 1 секунда, не 10) — но, в
+ *  отличие от разбора уже готовой строки по количеству введённых ":", здесь
+ *  недописанный ПЕРВЫЙ сегмент (минуты/часы) не путается с секундами: "11"
+ *  при ширине сегмента минут 2 — это 11 МИНУТ (ещё не дописанные секунды),
+ *  а не 11 секунд. Раньше именно эта путаница приводила к тому, что "11"
+ *  показывались как 11 секунд, а следующая цифра резко превращала это в
+ *  "11:01" вместо ожидаемого продолжения ввода минут. */
+function maskDigitsToSeconds(digits, segments) {
+  let idx = 0;
+  const values = segments.map((len) => {
+    const chunk = digits.slice(idx, idx + len);
+    idx += len;
+    return chunk === "" ? 0 : parseInt(chunk, 10);
+  });
+  if (values.length === 3) return values[0] * 3600 + values[1] * 60 + values[2];
+  if (values.length === 2) return values[0] * 60 + values[1];
+  return values[0];
+}
+
+/** rawValue — текущее содержимое замаскированного поля времени (с ":" или
+ *  ещё без него — не имеет значения). maxAbsSec — та же длительность, что
+ *  передаётся маске этого поля (см. attachTimeInputMask), нужна, чтобы знать
+ *  ширину сегмента минут/часов. null, если цифр в поле вообще нет. */
+/** true, если пользователь вручную поставил ":" (см. attachTimeInputMask) —
+ *  в этом случае поле больше не подчиняется фиксированной ширине сегментов,
+ *  а разбирается напрямую как "минуты:секунды" по месту, которое выбрал
+ *  сам пользователь. */
+function hasManualColon(value) {
+  return /^[0-9]+:[0-9]*$/.test(value || "");
+}
+
+function maskedInputToSeconds(rawValue, maxAbsSec) {
+  const value = rawValue || "";
+  if (hasManualColon(value)) {
+    const [minPart, secPart] = value.split(":");
+    const min = parseInt(minPart, 10) || 0;
+    const sec = secPart === "" ? 0 : parseInt(secPart, 10) || 0;
+    return min * 60 + sec;
+  }
+  const digits = value.replace(/[^0-9]/g, "");
+  if (!digits) return null;
+  return maskDigitsToSeconds(digits, timeMaskSegments(maxAbsSec));
+}
+
 /** Собирает отформатированную строку "12:11" из чистых цифр по сегментам.
  *  Останавливается, как только очередной сегмент не полностью заполнен —
  *  значит, дальше по треку пользователь ещё не допечатал, и рисовать
@@ -674,6 +802,19 @@ function digitIndexAtCaret(value, pos) {
     if (/[0-9]/.test(value[i])) count++;
   }
   return count;
+}
+
+/** true, если в поле сейчас только нули ("0:00", "0:00:00" и т.п. — в том
+ *  числе недописанные, вроде "00") — визуально приглушаем такое значение,
+ *  чтобы оно читалось как "заготовка", а не как осмысленно введённое время
+ *  (см. syncTimeInputZeroStyle). */
+function isAllZeroTimeValue(value) {
+  const digits = (value || "").replace(/[^0-9]/g, "");
+  return digits.length > 0 && /^0+$/.test(digits);
+}
+
+function syncTimeInputZeroStyle(inputEl) {
+  inputEl.classList.toggle("time-input-zero", isAllZeroTimeValue(inputEl.value));
 }
 
 /** Вешает на текстовое поле маску времени: редактируются только цифры,
@@ -707,11 +848,79 @@ function attachTimeInputMask(inputEl, getMaxAbsSeconds) {
   }
 
   inputEl.addEventListener("beforeinput", (e) => {
-    const segs = segments();
-    const cap = segs.reduce((a, b) => a + b, 0);
     const value = inputEl.value;
     const selStart = inputEl.selectionStart;
     const selEnd = inputEl.selectionEnd;
+
+    // Ручной ввод ":" — пользователь сам решает, где поставить разделитель,
+    // вместо того чтобы ждать автоматическую расстановку по фиксированной
+    // ширине сегмента. Разрешено только если: перед курсором уже есть хотя
+    // бы одна цифра (":" не может стоять первым символом), и в поле ещё нет
+    // другого ":" (двоеточие может быть только одно, как и раньше).
+    const pastedText = e.dataTransfer && e.dataTransfer.getData("text");
+    const isColonKey =
+      (e.inputType === "insertText" && e.data === ":") ||
+      (e.inputType === "insertFromPaste" && pastedText === ":");
+    if (isColonKey) {
+      e.preventDefault();
+      if (value.includes(":")) return; // уже есть — второе не ставим
+      if (digitIndexAtCaret(value, selStart) === 0) return; // должно стоять после цифр
+      const newValue = value.slice(0, selStart) + ":" + value.slice(selEnd);
+      inputEl.value = newValue;
+      inputEl.setSelectionRange(selStart + 1, selStart + 1);
+      inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+
+    // Двоеточие уже стоит там, где его поставил пользователь — дальше просто
+    // редактируем цифры по обе стороны от него напрямую в строке, не трогая
+    // его позицию и не переформатируя по фиксированным сегментам.
+    if (hasManualColon(value)) {
+      if (
+        e.inputType === "insertText" ||
+        e.inputType === "insertFromPaste" ||
+        e.inputType === "insertFromDrop" ||
+        e.inputType === "insertCompositionText"
+      ) {
+        e.preventDefault();
+        const raw = e.data != null ? e.data : pastedText || "";
+        const insertDigits = raw.replace(/[^0-9]/g, "");
+        if (!insertDigits) return;
+        const newValue = value.slice(0, selStart) + insertDigits + value.slice(selEnd);
+        inputEl.value = newValue;
+        const pos = selStart + insertDigits.length;
+        inputEl.setSelectionRange(pos, pos);
+        inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        return;
+      }
+      if (e.inputType === "deleteContentBackward" || e.inputType === "deleteContentForward") {
+        e.preventDefault();
+        let newValue, pos;
+        if (selStart !== selEnd) {
+          newValue = value.slice(0, selStart) + value.slice(selEnd);
+          pos = selStart;
+        } else if (e.inputType === "deleteContentBackward" && selStart > 0) {
+          newValue = value.slice(0, selStart - 1) + value.slice(selStart);
+          pos = selStart - 1;
+        } else if (e.inputType === "deleteContentForward" && selStart < value.length) {
+          newValue = value.slice(0, selStart) + value.slice(selStart + 1);
+          pos = selStart;
+        } else {
+          return;
+        }
+        inputEl.value = newValue;
+        inputEl.setSelectionRange(pos, pos);
+        inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+        return;
+      }
+      return;
+    }
+
+    // Обычный автоматический режим (двоеточия ещё нет) — как раньше:
+    // редактируем только цифры, разделитель расставляется сам по фиксированной
+    // ширине сегментов.
+    const segs = segments();
+    const cap = segs.reduce((a, b) => a + b, 0);
     const digits = digitsOf(value);
     const startDigitIdx = digitIndexAtCaret(value, selStart);
     const endDigitIdx = digitIndexAtCaret(value, selEnd);
@@ -723,7 +932,7 @@ function attachTimeInputMask(inputEl, getMaxAbsSeconds) {
       e.inputType === "insertCompositionText"
     ) {
       e.preventDefault();
-      const raw = e.data != null ? e.data : (e.dataTransfer && e.dataTransfer.getData("text")) || "";
+      const raw = e.data != null ? e.data : pastedText || "";
       const insertDigits = raw.replace(/[^0-9]/g, "");
       if (!insertDigits) return;
       const before = digits.slice(0, startDigitIdx);
@@ -758,8 +967,11 @@ function attachTimeInputMask(inputEl, getMaxAbsSeconds) {
   });
 
   // Fallback на случай, если beforeinput недоступен/не даёт нужных данных —
-  // просто пересобираем маску из того, что реально оказалось в поле.
+  // просто пересобираем маску из того, что реально оказалось в поле. Ручное
+  // двоеточие (hasManualColon) не трогаем — оно стоит там, где его поставил
+  // пользователь, а не по фиксированной ширине сегмента.
   inputEl.addEventListener("input", () => {
+    if (hasManualColon(inputEl.value)) return;
     const segs = segments();
     const cap = segs.reduce((a, b) => a + b, 0);
     const digits = digitsOf(inputEl.value).slice(0, cap);
@@ -768,6 +980,28 @@ function attachTimeInputMask(inputEl, getMaxAbsSeconds) {
       inputEl.value = expected;
       const pos = expected.length;
       inputEl.setSelectionRange(pos, pos);
+    }
+  });
+
+  // Значение по умолчанию (обычно "0:00") визуально приглушаем — оно
+  // выглядит как незаполненный "фон", а не как реально введённое время.
+  inputEl.addEventListener("input", () => syncTimeInputZeroStyle(inputEl));
+  syncTimeInputZeroStyle(inputEl);
+
+  // Выделяем всё содержимое при получении фокуса — тогда первая же введённая
+  // цифра сразу заменяет дефолтные нули, стирать их вручную не нужно.
+  // mouseup от того же клика, которым поле получило фокус, иначе браузер
+  // сам снимает это выделение и ставит курсор в точку клика; последующие
+  // клики внутри уже сфокусированного поля работают как обычно.
+  let justFocused = false;
+  inputEl.addEventListener("focus", () => {
+    justFocused = true;
+    inputEl.select();
+  });
+  inputEl.addEventListener("mouseup", (e) => {
+    if (justFocused) {
+      e.preventDefault();
+      justFocused = false;
     }
   });
 }
@@ -785,7 +1019,10 @@ function selectTrackIndex(idx, { syncInput = true } = {}) {
   state.selectedTrackIndex = idx;
   el.trackSlider.value = idx;
   el.trackSliderLabel.textContent = sliderLabelText(idx);
-  if (syncInput) el.timeInput.value = elapsedLabel(idx) ?? "";
+  if (syncInput) {
+    el.timeInput.value = elapsedLabel(idx) ?? "";
+    syncTimeInputZeroStyle(el.timeInput);
+  }
   render();
 }
 
@@ -820,6 +1057,78 @@ el.timeInput.addEventListener("keydown", (e) => {
   if (commitTimeInput()) el.armButton.click();
 });
 
+// ---------- История опорных точек (отменить/повторить) ----------
+//
+// Раньше "Отменить" делал state.controlPoints.pop() — но массив всегда
+// отсортирован по trackIndex (см. sortControlPoints), поэтому pop()
+// удалял точку с наибольшим trackIndex, а не ту, что пользователь
+// действительно поставил последней по времени действия. Например: точки
+// поставлены в порядке 5:00, 1:00, 3:00 — pop() удалял бы 5:00 (последнюю
+// в отсортированном массиве), хотя последним действием пользователя было
+// добавление 3:00.
+//
+// Вместо точечного трекинга "какая точка была последней" — обычный стек
+// снимков ВСЕГО массива controlPoints, как в любом редакторе с Ctrl+Z/
+// Ctrl+Y: перед каждым изменяющим действием (добавление, удаление,
+// перестановка на карте, ретайм, очистка) кладём в history снимок
+// состояния ДО изменения. "Отменить"/"Повторить" — это просто шаг назад/
+// вперёд по этому стеку, и он всегда соответствует РЕАЛЬНОЙ хронологии
+// действий, а не порядку сортировки.
+
+function snapshotControlPoints() {
+  return state.controlPoints.map((cp) => ({
+    trackIndex: cp.trackIndex,
+    source: { ...cp.source },
+    target: { ...cp.target },
+  }));
+}
+
+/** Вызывать ПЕРЕД любым изменением state.controlPoints — сохраняет снимок
+ *  ещё не изменённого состояния. Новое действие всегда обнуляет "future":
+ *  как только пользователь пошёл по новой ветке изменений, старое
+ *  "повторить" перестаёт быть валидным (как в любом обычном undo/redo). */
+function pushControlPointHistory() {
+  state.history.push(snapshotControlPoints());
+  state.future = [];
+}
+
+/** Полный сброс истории — при загрузке нового трека и после применения
+ *  обрезки (обрезка может сделать старые снимки не соответствующими новому
+ *  допустимому диапазону индексов, поэтому не пытаемся их сохранить). */
+function resetControlPointHistory() {
+  state.history = [];
+  state.future = [];
+}
+
+function undoControlPoints() {
+  if (state.history.length === 0) return;
+  state.future.push(snapshotControlPoints());
+  state.controlPoints = state.history.pop();
+  state.repositionArmedIndex = null;
+  recomputeModel();
+  updateCalibPanel();
+  render();
+}
+
+function redoControlPoints() {
+  if (state.future.length === 0) return;
+  state.history.push(snapshotControlPoints());
+  state.controlPoints = state.future.pop();
+  state.repositionArmedIndex = null;
+  recomputeModel();
+  updateCalibPanel();
+  render();
+}
+
+/** Есть ли уже опорная точка на этой точке трека (excludeIndex — позиция в
+ *  controlPoints, которую нужно игнорировать при проверке, например саму
+ *  перемещаемую точку при ретайме). Двух опорных точек с одинаковым временем
+ *  быть не должно — для segmented-модели это означает нулевую длину сегмента
+ *  между ними, что ломает подобие (деление на ноль/вырожденное преобразование). */
+function hasControlPointAtTrackIndex(trackIndex, excludeIndex = -1) {
+  return state.controlPoints.some((cp, i) => i !== excludeIndex && cp.trackIndex === trackIndex);
+}
+
 // ---------- Калибровка (опорные точки) ----------
 
 el.armButton.addEventListener("click", () => {
@@ -834,6 +1143,10 @@ el.armButton.addEventListener("click", () => {
   }
   if (!state.mapImage) {
     showStatus("Сначала загрузи изображение карты", true);
+    return;
+  }
+  if (hasControlPointAtTrackIndex(state.selectedTrackIndex)) {
+    showStatus("На этой точке трека уже есть опорная точка — выбери другое время", true);
     return;
   }
   // Одновременно может быть только один режим ожидания клика по карте —
@@ -881,7 +1194,10 @@ el.canvas.addEventListener("click", (e) => {
     const rect = el.canvas.getBoundingClientRect();
     const canvasPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     const cp = state.controlPoints[state.repositionArmedIndex];
-    if (cp) cp.target = canvasToImg(canvasPt);
+    if (cp) {
+      pushControlPointHistory();
+      cp.target = canvasToImg(canvasPt);
+    }
     state.repositionArmedIndex = null;
     updateCanvasCursor();
     recomputeModel();
@@ -902,9 +1218,23 @@ el.canvas.addEventListener("click", (e) => {
   const canvasPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
   const imgPt = canvasToImg(canvasPt);
 
+  // Проверяем ещё раз прямо перед созданием точки: пока курсор был в
+  // режиме ожидания клика по карте, пользователь мог успеть подвинуть
+  // слайдер/поле времени и выбрать другую точку трека, для которой уже
+  // есть опорная точка (проверка при нажатии "Добавить" этого не ловит).
+  if (hasControlPointAtTrackIndex(state.selectedTrackIndex)) {
+    showStatus("На этой точке трека уже есть опорная точка — выбери другое время", true);
+    state.armedForClick = false;
+    el.armButton.textContent = "Добавить опорную точку";
+    el.armButton.classList.remove("armed");
+    updateCanvasCursor();
+    return;
+  }
+
   const trackPoint = state.trackStats.points[state.selectedTrackIndex];
   const source = state.projection.toMeters(trackPoint.lat, trackPoint.lon);
 
+  pushControlPointHistory();
   state.controlPoints.push({
     trackIndex: state.selectedTrackIndex,
     source,
@@ -922,15 +1252,66 @@ el.canvas.addEventListener("click", (e) => {
   render();
 });
 
-el.undoButton.addEventListener("click", () => {
-  state.controlPoints.pop();
-  state.repositionArmedIndex = null;
-  recomputeModel();
-  updateCalibPanel();
-  render();
+/** Двойной клик по точке трека на карте — быстрый способ сразу и выбрать
+ *  эту точку, и включить режим "жду клика по карте" для добавления опорной
+ *  точки (эквивалент клика по точке + кнопке "Добавить опорную точку"), с
+ *  коротким пульсом на месте точки как подтверждением. */
+el.canvas.addEventListener("dblclick", (e) => {
+  if (!state.model || !state.trackStats) return;
+  if (state.repositionArmedIndex !== null) return; // не мешаем активной перестановке существующей точки
+  const rect = el.canvas.getBoundingClientRect();
+  const canvasPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  const idx = findNearestTrackIndexByCanvasPoint(canvasPt);
+  if (idx === null) return;
+
+  selectTrackIndex(idx);
+
+  if (hasControlPointAtTrackIndex(idx)) {
+    showStatus("На этой точке трека уже есть опорная точка", true);
+    return;
+  }
+
+  if (!state.armedForClick) {
+    state.armedForClick = true;
+    el.armButton.textContent = "Отмена";
+    el.armButton.classList.add("armed");
+    updateCanvasCursor();
+  }
+
+  startArmPulse(idx);
+});
+
+el.undoButton.addEventListener("click", undoControlPoints);
+el.redoButton.addEventListener("click", redoControlPoints);
+
+// Горячие клавиши: Ctrl/Cmd+Z — отменить, Ctrl/Cmd+Shift+Z и Ctrl/Cmd+Y —
+// повторить (поддерживаем оба варианта, т.к. привычки разнятся между
+// редакторами). Не перехватываем их, пока фокус в текстовом поле (там это
+// должен обрабатывать нативный undo самого поля ввода) и пока открыта
+// модалка обрезки — там свой контекст.
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const key = e.key.toLowerCase();
+  if (key !== "z" && key !== "y") return;
+
+  const target = e.target;
+  const isTextInput =
+    target &&
+    (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+  if (isTextInput) return;
+  if (!el.trimModal.classList.contains("hidden")) return;
+
+  if (key === "y" || (key === "z" && e.shiftKey)) {
+    e.preventDefault();
+    redoControlPoints();
+  } else {
+    e.preventDefault();
+    undoControlPoints();
+  }
 });
 
 el.clearCalibButton.addEventListener("click", () => {
+  if (state.controlPoints.length > 0) pushControlPointHistory();
   state.controlPoints = [];
   state.model = null;
   state.repositionArmedIndex = null;
@@ -949,6 +1330,7 @@ function recomputeModel() {
 }
 
 function removeControlPoint(index) {
+  pushControlPointHistory();
   state.controlPoints.splice(index, 1);
   state.repositionArmedIndex = null; // индексы сдвинулись — снимаем режим перестановки, если был активен
   recomputeModel();
@@ -965,8 +1347,14 @@ function retimeControlPoint(index, raw) {
     updateCalibPanel(); // откатить текстовое поле к прежнему значению
     return;
   }
+  if (hasControlPointAtTrackIndex(newIdx, index)) {
+    showStatus("На этой точке трека уже есть опорная точка — выбери другое время", true);
+    updateCalibPanel(); // откатить текстовое поле к прежнему значению
+    return;
+  }
   const cp = state.controlPoints[index];
   const newPoint = state.trackStats.points[newIdx];
+  pushControlPointHistory();
   cp.trackIndex = newIdx;
   cp.source = state.projection.toMeters(newPoint.lat, newPoint.lon);
   sortControlPoints(); // порядок в массиве может измениться — снимаем режим перестановки, если был активен
@@ -999,7 +1387,11 @@ el.colorSlow.value = state.paceColorSlow;
 updateLegendGradient();
 
 el.opacitySlider.addEventListener("input", () => {
-  state.routeOpacity = Number(el.opacitySlider.value) / 100;
+  // Слайдер показывает "прозрачность": 0% — полностью непрозрачная линия,
+  // максимум — самая прозрачная (но не до нуля, чтобы линия не пропадала
+  // совсем). routeOpacity — это фактическая непрозрачность (globalAlpha),
+  // поэтому она обратна значению слайдера.
+  state.routeOpacity = 1 - Number(el.opacitySlider.value) / 100;
   el.opacityValue.textContent = `${el.opacitySlider.value}%`;
   render();
 });
@@ -1010,7 +1402,7 @@ el.widthSlider.addEventListener("input", () => {
   render();
 });
 
-el.opacitySlider.value = Math.round(state.routeOpacity * 100);
+el.opacitySlider.value = Math.round((1 - state.routeOpacity) * 100);
 el.opacityValue.textContent = `${el.opacitySlider.value}%`;
 el.widthSlider.value = state.routeWidth;
 el.widthValue.textContent = `${state.routeWidth} px`;
@@ -1068,7 +1460,8 @@ function findNearestIndexByTrimElapsed(targetSec) {
  *  только внутри текущей применённой обрезки), т.к. слайдеры обрезки и так
  *  позволяют выбрать любую точку от начала до конца записи. */
 function parseTrimTimeStringToIndex(raw) {
-  return parseTimeStringWith(raw, findNearestIndexByTrimElapsed);
+  const sec = maskedInputToSeconds(raw, trimModalMaxAbsSeconds());
+  return sec === null ? null : findNearestIndexByTrimElapsed(sec);
 }
 
 /** Длительность всего трека — по ней подбирается ширина маски ввода для
@@ -1107,6 +1500,8 @@ function syncTrimModalUI() {
   el.trimModalEndValue.textContent = trimTimeLabel(state.trimEndDraft);
   el.trimModalStartInput.value = trimTimeLabel(state.trimStartDraft);
   el.trimModalEndInput.value = trimTimeLabel(state.trimEndDraft);
+  syncTimeInputZeroStyle(el.trimModalStartInput);
+  syncTimeInputZeroStyle(el.trimModalEndInput);
 }
 
 /** Открывает модалку обрезки: черновик стартует от уже ПРИМЕНЁННОЙ обрезки
@@ -1134,6 +1529,10 @@ function applyTrimFromModal() {
   state.trimStart = state.trimStartDraft;
   state.trimEnd = state.trimEndDraft;
   pruneControlPointsOutsideTrim(); // точки вне диапазона пропадают именно здесь, не раньше
+  // Новая обрезка меняет допустимый диапазон индексов — старые снимки
+  // undo/redo могли содержать точки за его пределами, поэтому история
+  // сбрасывается, а не пытается "дожить" до нового состояния.
+  resetControlPointHistory();
   // Выбранная точка трека (индикатор/слайдер привязки) должна оставаться
   // внутри применённого диапазона — иначе она может оказаться ДО нового
   // trimStart и показывать отрицательное время (например "-1:00"), хотя
@@ -1206,6 +1605,7 @@ el.trimModalStartInput.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   setTrimStartDraftFromInput({ reportError: true });
   el.trimModalStartInput.value = trimTimeLabel(state.trimStartDraft); // переформатировать начисто
+  syncTimeInputZeroStyle(el.trimModalStartInput);
   el.trimModalStartInput.blur();
 });
 
@@ -1214,6 +1614,7 @@ el.trimModalEndInput.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   setTrimEndDraftFromInput({ reportError: true });
   el.trimModalEndInput.value = trimTimeLabel(state.trimEndDraft);
+  syncTimeInputZeroStyle(el.trimModalEndInput);
   el.trimModalEndInput.blur();
 });
 
@@ -1439,7 +1840,8 @@ function updateCalibPanel() {
   el.timeInput.value = elapsedLabel(state.selectedTrackIndex) ?? "";
   renderControlPointList();
 
-  el.undoButton.disabled = state.controlPoints.length === 0;
+  el.undoButton.disabled = state.history.length === 0;
+  el.redoButton.disabled = state.future.length === 0;
   el.clearCalibButton.disabled = state.controlPoints.length === 0;
 }
 
