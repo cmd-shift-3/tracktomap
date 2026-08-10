@@ -384,6 +384,11 @@ input[type="range"] {
   border-color: var(--accent-amber);
 }
 .time-input-row input[type="text"]:disabled { opacity: 0.4; }
+/* Дефолтное "0:00" — не осмысленно введённое значение, а заготовка: цвет
+   приглушаем, чтобы не выглядело так, будто его нужно стирать перед вводом. */
+.time-input-row input[type="text"].time-input-zero {
+  color: var(--text-muted);
+}
 .btn.small {
   width: auto;
   padding: 8px 12px;
@@ -427,6 +432,14 @@ input[type="range"] {
   margin-top: 10px;
 }
 .calib-actions .btn { width: auto; flex: 1; }
+.calib-actions .btn.icon-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  padding: 9px 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
 .control-point-list {
   list-style: none;
@@ -471,6 +484,9 @@ input[type="range"] {
 }
 .control-point-list .cp-time-input:disabled {
   opacity: 0.5;
+}
+.control-point-list .cp-time-input.time-input-zero {
+  color: var(--text-muted);
 }
 
 .slider-field {
