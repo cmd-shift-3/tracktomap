@@ -44,7 +44,7 @@
         Трек (GPX/TCX)
         <input type="file" id="trackInput" accept=".gpx,.tcx,application/gpx+xml" hidden />
       </label>
-      <button id="exportButton" class="file-btn primary">Экспорт PNG</button>
+      <button id="exportButton" class="file-btn primary">Сохранить</button>
     </div>
   </div>
 </header>
@@ -71,7 +71,7 @@
 
     <section id="zoomPanel" class="panel hidden collapsible">
       <button type="button" id="zoomToggleButton" class="panel-toggle" aria-expanded="true">
-        <h2>Масштаб карты</h2>
+        <h2>Масштабирование</h2>
         <span class="chevron">▾</span>
       </button>
       <div class="panel-collapse">
@@ -80,8 +80,8 @@
             <label class="field-label" for="zoomSlider">Масштаб <span id="zoomValue" class="field-value">100%</span></label>
             <input type="range" id="zoomSlider" min="50" max="400" step="10" value="100" />
           </div>
-          <button id="zoomResetButton" class="btn ghost small" type="button">Сбросить (по размеру окна)</button>
-          <p class="hint" style="margin: 10px 0 0;">Ctrl/Cmd + колесо мыши — зум по карте. Обычная прокрутка — перемещение по карте.</p>
+          <button id="zoomResetButton" class="btn ghost small" type="button">Сбросить</button>
+          <p class="hint" style="margin: 10px 0 0;">Используйте Ctrl/Cmd + колесо мыши для масштабирования</p>
         </div>
       </div>
     </section>
@@ -93,11 +93,10 @@
       </button>
       <div class="panel-collapse">
         <div class="panel-collapse-inner">
-          <label class="field-label" for="trackSlider">Точка трека</label>
+          <label class="field-label" for="trackSlider">Опорная точка</label>
           <input type="range" id="trackSlider" min="0" max="100" value="0" />
-          <div id="trackSliderLabel" class="slider-label">0%</div>
+          <div id="trackSliderLabel" class="slider-label hidden"></div>
 
-          <label class="field-label" for="timeInput">Или введи время вручную</label>
           <div class="time-input-row">
             <input type="text" id="timeInput" placeholder="напр. 3:45" />
           </div>
@@ -107,7 +106,18 @@
           <ul id="controlPointList" class="control-point-list"></ul>
 
           <div class="calib-actions">
-            <button id="undoButton" class="btn ghost" disabled>Отменить</button>
+            <button id="undoButton" class="btn ghost icon-btn" disabled title="Отменить последнее действие (Ctrl/Cmd+Z)" aria-label="Отменить">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="1 4 1 10 7 10"></polyline>
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+              </svg>
+            </button>
+            <button id="redoButton" class="btn ghost icon-btn" disabled title="Повторить отменённое действие (Ctrl/Cmd+Shift+Z)" aria-label="Повторить">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+            </button>
             <button id="clearCalibButton" class="btn ghost" disabled>Очистить всё</button>
           </div>
         </div>
@@ -134,8 +144,8 @@
           </div>
 
           <div class="slider-field">
-            <label class="field-label" for="opacitySlider">Прозрачность линии <span id="opacityValue" class="field-value">70%</span></label>
-            <input type="range" id="opacitySlider" min="10" max="100" step="5" value="70" />
+            <label class="field-label" for="opacitySlider">Прозрачность линии <span id="opacityValue" class="field-value">30%</span></label>
+            <input type="range" id="opacitySlider" min="0" max="90" step="5" value="30" />
           </div>
           <div class="slider-field">
             <label class="field-label" for="widthSlider">Толщина линии <span id="widthValue" class="field-value">4 px</span></label>
