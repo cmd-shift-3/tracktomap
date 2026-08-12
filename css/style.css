@@ -384,10 +384,16 @@ input[type="range"] {
   border-color: var(--accent-amber);
 }
 .time-input-row input[type="text"]:disabled { opacity: 0.4; }
-/* Дефолтное "0:00" — не осмысленно введённое значение, а заготовка: цвет
-   приглушаем, чтобы не выглядело так, будто его нужно стирать перед вводом. */
-.time-input-row input[type="text"].time-input-zero {
+/* Нулевое время ("0:00") больше не пишется в поле как настоящий текст —
+   пока действующее значение равно нулю, поле остаётся пустым, и вместо
+   текста показывается нативный placeholder. Он и так уже нулевое значение
+   "по умолчанию" — стирать его перед вводом не нужно, а при подтверждении
+   пустое поле трактуется как то же самое нулевое значение (см. app.js:
+   timeInputDisplayValue/пустые ветки commitTimeInput и т.п.), так что оно
+   учитывается после применения, даже оставаясь визуально пустым. */
+.time-input-row input[type="text"]::placeholder {
   color: var(--text-muted);
+  opacity: 1; /* Firefox по умолчанию снижает непрозрачность плейсхолдера */
 }
 .btn.small {
   width: auto;
@@ -485,8 +491,9 @@ input[type="range"] {
 .control-point-list .cp-time-input:disabled {
   opacity: 0.5;
 }
-.control-point-list .cp-time-input.time-input-zero {
+.control-point-list .cp-time-input::placeholder {
   color: var(--text-muted);
+  opacity: 1;
 }
 
 .slider-field {
@@ -541,13 +548,23 @@ input[type="range"] {
 .legend-gradient {
   height: 10px;
   border-radius: 3px;
-  background: linear-gradient(90deg, hsl(120,85%,45%), hsl(60,85%,45%), hsl(0,85%,45%));
+  /* Дефолтный фон на случай, пока JS ещё не выставил инлайновый градиент
+     (см. app.js: updateLegendGradient/paceGradientCss) — уже совпадает с
+     дефолтными 4 цветами шкалы: зелёный → жёлтый → оранжевый → красный. */
+  background: linear-gradient(90deg, #0cdf59, #f6fa00, #fbad28, #ff1414);
 }
 .legend-color-row {
   display: flex;
   justify-content: space-between;
   margin-top: 10px;
   margin-bottom: 14px;
+}
+/* Ряд из 4 цветовых остановок градиента (быстро → медленно) — уже не
+   и пар "2 подписанных кружка", а полноценная шкала; средние 2 остановки
+   идут без подписи (см. index.html), поэтому им не нужен тот же gap, что
+   и крайним. */
+.legend-color-row-4 {
+  gap: 6px;
 }
 .color-field {
   display: flex;
@@ -568,6 +585,15 @@ input[type="range"] {
 }
 .color-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .color-field input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
+
+/* Текстовое поле точного ввода темпа (мм:сс) сразу под ползунком границы
+   шкалы ("быстро"/"медленно") — обычный .time-input-row, но без лишнего
+   отступа снизу, раз следом сразу идёт следующее .slider-field со своим
+   собственным margin-bottom. */
+.slider-field .time-input-row {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
 
 /* ---------- Canvas ---------- */
 
