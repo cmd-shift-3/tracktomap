@@ -4,6 +4,7 @@ const CONTROL_POINT_COLOR = "#facc15"; // жёлтый — хорошо чита
 const CURRENT_POINT_COLOR = "#f2b8b5";
 const MARKER_OUTLINE_COLOR = "#000000";
 const MARKER_OUTLINE_WIDTH = 0.6; // очень тонкая, но заметная чёрная оконтовка
+const DEFAULT_PACE_COLOR_STOPS = ["#0cdf59", "#f6fa00", "#fbad28", "#ff1414"]; // зелёный(12,223,89) → жёлтый(246,250,0) → оранжевый(251,173,40) → красный(255,20,20) — дефолт и цель кнопки "Сбросить цвета"
 
 const state = {
   mapImage: null, // HTMLImageElement
@@ -23,9 +24,11 @@ const state = {
   repositionArmedIndex: null, // индекс опорной точки, для которой ждём клика по карте, чтобы переставить её место
   selectedTrackIndex: 0,
   hoverTrackIndex: null, // точка трека под курсором мыши (предпросмотр перед фиксацией кликом)
+  currentIndicatorVisible: true, // видимость маркера текущей точки на треке (см. drawCurrentIndicator); прячется сразу после фиксации опорной точки, пока пользователь не выберет новую точку
   pulseAnimation: null, // { index, startTime } — анимация-пульс при активации привязки двойным кликом
-  paceColorFast: "#22c55e",
-  paceColorSlow: "#ef4444",
+  paceColorStops: [...DEFAULT_PACE_COLOR_STOPS], // зелёный → жёлтый → оранжевый → красный, плавный 4-цветный градиент по умолчанию
+  paceMinSecPerKm: null, // темп левой границы шкалы (самый быстрый/первый цвет) — авто при загрузке трека, дальше можно двигать вручную (ползунок/поле ввода)
+  paceMaxSecPerKm: null, // темп правой границы шкалы (самый медленный/последний цвет)
   routeOpacity: 0.7,
   routeWidth: 4,
   trimStart: 0, // индекс точки трека — начало ПРИМЕНЁННОЙ обрезки (используется в render/статистике/точке отсчёта времени)
@@ -60,8 +63,17 @@ const el = {
   statusMsg: document.getElementById("statusMsg"),
   legendPanel: document.getElementById("legendPanel"),
   legendGradient: document.getElementById("legendGradient"),
-  colorFast: document.getElementById("colorFast"),
-  colorSlow: document.getElementById("colorSlow"),
+  colorStop0: document.getElementById("colorStop0"),
+  colorStop1: document.getElementById("colorStop1"),
+  colorStop2: document.getElementById("colorStop2"),
+  colorStop3: document.getElementById("colorStop3"),
+  resetColorsButton: document.getElementById("resetColorsButton"),
+  paceMinSlider: document.getElementById("paceMinSlider"),
+  paceMinValue: document.getElementById("paceMinValue"),
+  paceMinInput: document.getElementById("paceMinInput"),
+  paceMaxSlider: document.getElementById("paceMaxSlider"),
+  paceMaxValue: document.getElementById("paceMaxValue"),
+  paceMaxInput: document.getElementById("paceMaxInput"),
   opacitySlider: document.getElementById("opacitySlider"),
   opacityValue: document.getElementById("opacityValue"),
   widthSlider: document.getElementById("widthSlider"),
@@ -203,8 +215,10 @@ async function handleTrackFile(file) {
     resetControlPointHistory();
     state.model = null;
     state.selectedTrackIndex = 0;
+    state.currentIndicatorVisible = true;
     state.trimStart = 0;
     state.trimEnd = points.length - 1;
+    setupPaceSliders(); // границы шкалы темпа по умолчанию — авто по данным трека, дальше можно двигать вручную
     updateStatsPanel();
     updateCalibPanel();
     updateLegendPanelVisibility();
@@ -362,7 +376,10 @@ window.addEventListener("resize", () => {
   }
 });
 
-function render() {
+/** includeMarkers=false рисует только карту и трек, без опорных точек,
+ *  текущей точки и пульса привязки — используется при экспорте в PNG,
+ *  чтобы служебные маркеры калибровки не попадали в сохранённую картинку. */
+function render({ includeMarkers = true } = {}) {
   if (!state.mapImage) return;
 
   // Очистка должна пройти по всему backing store, а не по CSS-размеру,
@@ -374,9 +391,11 @@ function render() {
 
   ctx.drawImage(state.mapImage, 0, 0, state.displayW, state.displayH);
   drawRoute();
-  drawControlPoints();
-  drawCurrentIndicator();
-  drawArmPulse();
+  if (includeMarkers) {
+    drawControlPoints();
+    drawCurrentIndicator();
+    drawArmPulse();
+  }
 }
 
 function imgToCanvas(pt) {
@@ -399,64 +418,120 @@ function projectTrackPoint(index) {
 const routeBuffer = document.createElement("canvas");
 const routeBufferCtx = routeBuffer.getContext("2d");
 
+/** Лёгкое сглаживание "дрожания" сырых GPS-точек — взвешенное скользящее
+ *  среднее по 3 соседним точкам, уже в canvas-координатах. Не трогает ни
+ *  данные трека, ни точки привязки/статистику — влияет ТОЛЬКО на то, как
+ *  рисуется линия маршрута. Первая и последняя точка не сдвигаются —
+ *  иначе трек визуально "отрывался" бы от индикатора текущей точки/опорных
+ *  точек на своих концах. */
+function smoothPolylinePass(pts) {
+  if (pts.length < 3) return pts.slice();
+  const out = new Array(pts.length);
+  out[0] = pts[0];
+  out[pts.length - 1] = pts[pts.length - 1];
+  for (let i = 1; i < pts.length - 1; i++) {
+    out[i] = {
+      x: pts[i - 1].x * 0.25 + pts[i].x * 0.5 + pts[i + 1].x * 0.25,
+      y: pts[i - 1].y * 0.25 + pts[i].y * 0.5 + pts[i + 1].y * 0.25,
+    };
+  }
+  return out;
+}
+
+const ROUTE_SMOOTH_PASSES = 2; // повторов сглаживания — больше = меньше "дрожи", но сильнее срезает резкие повороты
+
+// Раньше линия трека рисовалась вручную полигонами: для каждого сегмента
+// считалась нормаль к направлению движения, а на стыках соседних сегментов
+// нормали двух рёбер усреднялись, чтобы получить "митр"-смещение вершины.
+// На резком развороте (частый случай в ориентировании — КП с "крюком")
+// направление между соседними точками почти разворачивается на 180°, и
+// такое усреднение вырождалось: вместо ровного стыка поперёк линии
+// получался перекошенный клин — та самая диагональная полоса чужого цвета
+// поперёк трека на разворотах.
+//
+// Раскраска по кускам (один stroke() на кусок с одним цветом, вариант,
+// испробованный до этого) тоже не подошла: даже со скруглёнными углами
+// внутри куска, ГРАНИЦЫ между кусками — это концы отдельных stroke()-вызовов
+// со своим капом. round-cap давал растущий с толщиной линии кружок на
+// каждой границе цвета ("бусины"), а butt-cap — "ёлочку": соседние сегменты
+// после сглаживания всё равно чуть отличаются по направлению (GPS не
+// идеально прямой), и плоский срез под этим небольшим углом не совпадает
+// с соседним куском, давая зубчатый шов вдоль всей линии.
+//
+// Решение — не пытаться подогнать форму КАЖДОГО куска руками, а развести
+// геометрию и раскраску на два прохода:
+//   1) форма — ОДИН сплошной stroke() через ВСЕ точки трека целиком (без
+//      единого разрыва), с lineJoin="round" — стыки на любом угле, включая
+//      развороты, считает браузер, вырождения нормали нет вообще, т.к.
+//      нормаль нигде не считается вручную;
+//   2) раскраска — рисуется ПОВЕРХ этой формы с
+//      ctx.globalCompositeOperation = "source-atop": в этом режиме новая
+//      отрисовка проявляется только там, где на канвасе уже есть
+//      непрозрачные пиксели (то есть точно внутри контура формы из шага 1),
+//      и обрезается точно по этому контуру. Значит, каждый цветной сегмент
+//      можно красить отдельным stroke() с обычными круглыми капами — любые
+//      "вылезающие" за пределы истинной формы кусочки (те самые бусины и
+//      зубцы) автоматически обрезаются, и артефакт физически не может
+//      появиться независимо от толщины линии.
 function drawRoute() {
   if (!state.model || !state.trackStats) return;
-  const { points, minPaceSecPerKm, maxPaceSecPerKm } = state.trackStats;
+  const { points } = state.trackStats;
   const projected = points.map((p, i) => imgToCanvas(projectTrackPoint(i)));
 
-  // Трек рисуется на отдельном канвасе с ПОЛНОЙ непрозрачностью (каждый
-  // сегмент поверх предыдущего без прозрачности), а затем весь результат
-  // одним изображением накладывается на карту с нужной прозрачностью.
-  // Если вместо этого рисовать каждый сегмент сразу с globalAlpha < 1 (как
-  // было раньше), скруглённые стыки соседних сегментов накладываются друг
-  // на друга и повторно смешиваются с подложкой — на стыках получаются
-  // заметно более тёмные кружки, и линия выглядит как цепочка точек, а не
-  // как ровная гладкая линия. Отрисовка в один проход это устраняет.
+  // Трек рисуется на отдельном канвасе с ПОЛНОЙ непрозрачностью, а затем
+  // весь результат одним изображением накладывается на карту с нужной
+  // прозрачностью (см. ctx.globalAlpha ниже) — иначе полупрозрачные слои
+  // раскраски накладывались бы друг на друга и на подложку многократно.
   routeBuffer.width = el.canvas.width;
   routeBuffer.height = el.canvas.height;
   const dpr = window.devicePixelRatio || 1;
   routeBufferCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
   // Толщина линии задаётся в "метрах карты" (пикселях при zoomLevel=1) и
   // масштабируется вместе с зумом — иначе при уменьшении масштаба карты
   // линия остаётся того же экранного размера, а сама карта становится
   // меньше, и трек визуально "толстеет" относительно неё.
   const scaledRouteWidth = state.routeWidth * state.zoomLevel;
-  routeBufferCtx.lineWidth = scaledRouteWidth;
-  routeBufferCtx.lineJoin = "round";
-  // lineCap "round" рисует у каждого короткого сегмента отдельную
-  // полукруглую "шапочку" на обоих концах — при частых точках GPS-трека
-  // (короткие сегменты) эти шапочки визуально сливаются в цепочку кружков.
-  // "butt" обрезает сегмент ровно по длине — соседние сегменты стыкуются
-  // краями, и линия читается как одна непрерывная полоса.
-  routeBufferCtx.lineCap = "butt";
-  // Небольшое перекрытие концов каждого сегмента (на полтолщины линии)
-  // устраняет тонкие зазоры/зубцы на поворотах, которые остаются при
-  // butt-обрезке двух отдельных stroke()-вызовов, встречающихся под углом.
-  const overlap = scaledRouteWidth * 0.5;
+
   const from = Math.max(1, state.trimStart + 1);
   const to = Math.min(projected.length - 1, state.trimEnd);
+  if (to < from) return;
+
+  let smoothed = projected;
+  for (let pass = 0; pass < ROUTE_SMOOTH_PASSES; pass++) smoothed = smoothPolylinePass(smoothed);
+
+  // ---- Шаг 1: форма — один сплошной путь через все точки диапазона ----
+  routeBufferCtx.lineWidth = scaledRouteWidth;
+  routeBufferCtx.lineJoin = "round";
+  routeBufferCtx.lineCap = "round"; // скруглённые самые первый/последний концы всего трека — единственные настоящие "концы" во всей отрисовке
+  routeBufferCtx.strokeStyle = "#000"; // цвет неважен — этот проход задаёт только форму (альфа-маску) для шага 2
+  routeBufferCtx.beginPath();
+  routeBufferCtx.moveTo(smoothed[from - 1].x, smoothed[from - 1].y);
+  for (let i = from; i <= to; i++) routeBufferCtx.lineTo(smoothed[i].x, smoothed[i].y);
+  routeBufferCtx.stroke();
+
+  // ---- Шаг 2: раскраска поверх формы, обрезанная по её контуру ----
+  // Раскраска — по СГЛАЖЕННОМУ темпу (state.trackStats.smoothedPace), а не
+  // по сырому points[i].segPaceSecPerKm: точка-к-точке темп слишком шумный
+  // из-за погрешности GPS.
+  routeBufferCtx.save();
+  routeBufferCtx.globalCompositeOperation = "source-atop";
+  routeBufferCtx.lineJoin = "round";
+  routeBufferCtx.lineCap = "round";
   for (let i = from; i <= to; i++) {
-    const a = projected[i - 1];
-    const b = projected[i];
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const len = Math.hypot(dx, dy);
-    let sx = a.x, sy = a.y, ex = b.x, ey = b.y;
-    if (len > 0) {
-      const ux = dx / len;
-      const uy = dy / len;
-      sx -= ux * overlap;
-      sy -= uy * overlap;
-      ex += ux * overlap;
-      ey += uy * overlap;
-    }
-    const pace = points[i].segPaceSecPerKm;
-    routeBufferCtx.strokeStyle = paceToColor(pace, minPaceSecPerKm, maxPaceSecPerKm, state.paceColorFast, state.paceColorSlow);
+    const color = paceToColor(
+      state.trackStats.smoothedPace[i],
+      state.paceMinSecPerKm,
+      state.paceMaxSecPerKm,
+      state.paceColorStops
+    );
+    routeBufferCtx.strokeStyle = color;
     routeBufferCtx.beginPath();
-    routeBufferCtx.moveTo(sx, sy);
-    routeBufferCtx.lineTo(ex, ey);
+    routeBufferCtx.moveTo(smoothed[i - 1].x, smoothed[i - 1].y);
+    routeBufferCtx.lineTo(smoothed[i].x, smoothed[i].y);
     routeBufferCtx.stroke();
   }
+  routeBufferCtx.restore(); // возвращает globalCompositeOperation к обычному "source-over"
 
   ctx.save();
   ctx.globalAlpha = state.routeOpacity;
@@ -509,9 +584,14 @@ function drawControlPoints() {
 
 /** Точка трека, отслеживаемая указателем мыши/зафиксированная кликом —
  *  видна прямо на карте. Пока курсор над треком — индикатор следует за
- *  ним (hoverTrackIndex); клик фиксирует эту точку как selectedTrackIndex. */
+ *  ним (hoverTrackIndex); клик фиксирует эту точку как selectedTrackIndex.
+ *  currentIndicatorVisible=false прячет маркер selectedTrackIndex (но не
+ *  живой предпросмотр под курсором) — используется сразу после добавления
+ *  опорной точки, чтобы старая "текущая точка" не оставалась висеть на
+ *  треке поверх/рядом со свежедобавленной опорной точкой. */
 function drawCurrentIndicator() {
   if (!state.model || !state.trackStats) return;
+  if (state.hoverTrackIndex === null && !state.currentIndicatorVisible) return;
   const idx = state.hoverTrackIndex !== null ? state.hoverTrackIndex : state.selectedTrackIndex;
   const pt = imgToCanvas(projectTrackPoint(idx));
 
@@ -804,17 +884,31 @@ function digitIndexAtCaret(value, pos) {
   return count;
 }
 
-/** true, если в поле сейчас только нули ("0:00", "0:00:00" и т.п. — в том
- *  числе недописанные, вроде "00") — визуально приглушаем такое значение,
- *  чтобы оно читалось как "заготовка", а не как осмысленно введённое время
- *  (см. syncTimeInputZeroStyle). */
+/** true, если строка времени состоит только из нулей ("0:00", "0:00:00" и
+ *  т.п., в том числе недописанные вроде "00"). */
 function isAllZeroTimeValue(value) {
   const digits = (value || "").replace(/[^0-9]/g, "");
   return digits.length > 0 && /^0+$/.test(digits);
 }
 
-function syncTimeInputZeroStyle(inputEl) {
-  inputEl.classList.toggle("time-input-zero", isAllZeroTimeValue(inputEl.value));
+/** То, что реально должно попасть в input.value для отформатированной метки
+ *  времени: если метка нулевая ("0:00"), поле остаётся ПУСТЫМ, и вместо неё
+ *  виден нативный placeholder (нули "на заднем фоне" поля — см. style.css).
+ *  Само нулевое значение при этом никуда не девается: оно продолжает жить в
+ *  состоянии (trimStart/trimEnd/selectedTrackIndex и т.п.) и учитывается как
+ *  обычно при "Применить"/фиксации — меняется только то, что показывается
+ *  пользователю. */
+function timeInputDisplayValue(label) {
+  if (label === null || label === undefined) return "";
+  return isAllZeroTimeValue(label) ? "" : label;
+}
+
+/** Плейсхолдер-текст для замаскированного поля времени, подобранный под
+ *  текущую ширину сегментов (например "0:00" или "0:00:00") — чтобы нули
+ *  на фоне визуально совпадали по формату с реальным вводом. */
+function zeroTimeMaskLabel(maxAbsSec) {
+  const segs = timeMaskSegments(maxAbsSec);
+  return segs.map((len, i) => (i === 0 ? "0" : "0".repeat(len))).join(":");
 }
 
 /** Вешает на текстовое поле маску времени: редактируются только цифры,
@@ -886,9 +980,21 @@ function attachTimeInputMask(inputEl, getMaxAbsSeconds) {
         const raw = e.data != null ? e.data : pastedText || "";
         const insertDigits = raw.replace(/[^0-9]/g, "");
         if (!insertDigits) return;
-        const newValue = value.slice(0, selStart) + insertDigits + value.slice(selEnd);
+        let newValue = value.slice(0, selStart) + insertDigits + value.slice(selEnd);
+        let pos = selStart + insertDigits.length;
+        // После ":" — не больше двух цифр (секунды 0-59): лишние обрезаем,
+        // а не просто запрещаем весь ввод, чтобы вставка длинной строки
+        // тоже корректно укорачивалась, а не отклонялась целиком.
+        const colonIdx = newValue.indexOf(":");
+        if (colonIdx !== -1) {
+          const minPart = newValue.slice(0, colonIdx);
+          const secPart = newValue.slice(colonIdx + 1);
+          if (secPart.length > 2) {
+            newValue = minPart + ":" + secPart.slice(0, 2);
+            pos = Math.min(pos, newValue.length);
+          }
+        }
         inputEl.value = newValue;
-        const pos = selStart + insertDigits.length;
         inputEl.setSelectionRange(pos, pos);
         inputEl.dispatchEvent(new Event("input", { bubbles: true }));
         return;
@@ -983,11 +1089,6 @@ function attachTimeInputMask(inputEl, getMaxAbsSeconds) {
     }
   });
 
-  // Значение по умолчанию (обычно "0:00") визуально приглушаем — оно
-  // выглядит как незаполненный "фон", а не как реально введённое время.
-  inputEl.addEventListener("input", () => syncTimeInputZeroStyle(inputEl));
-  syncTimeInputZeroStyle(inputEl);
-
   // Выделяем всё содержимое при получении фокуса — тогда первая же введённая
   // цифра сразу заменяет дефолтные нули, стирать их вручную не нужно.
   // mouseup от того же клика, которым поле получило фокус, иначе браузер
@@ -1017,11 +1118,11 @@ function sliderLabelText(idx) {
  *  (используется при вводе с клавиатуры, чтобы не сбивать то, что печатает пользователь). */
 function selectTrackIndex(idx, { syncInput = true } = {}) {
   state.selectedTrackIndex = idx;
+  state.currentIndicatorVisible = true; // пользователь снова явно выбрал точку — маркер должен быть виден
   el.trackSlider.value = idx;
   el.trackSliderLabel.textContent = sliderLabelText(idx);
   if (syncInput) {
-    el.timeInput.value = elapsedLabel(idx) ?? "";
-    syncTimeInputZeroStyle(el.timeInput);
+    el.timeInput.value = timeInputDisplayValue(elapsedLabel(idx));
   }
   render();
 }
@@ -1040,6 +1141,12 @@ el.timeInput.addEventListener("input", () => {
 });
 
 function commitTimeInput() {
+  if (el.timeInput.value.trim() === "") {
+    // Пустое поле — это плейсхолдер уже действующего (нулевого) значения,
+    // а не ошибка: просто возвращаем поле к текущему выбору как есть.
+    selectTrackIndex(state.selectedTrackIndex);
+    return true;
+  }
   const idx = parseTimeStringToIndex(el.timeInput.value);
   if (idx === null) {
     showStatus("Неверный формат, используй ММ:СС или Ч:ММ:СС", true);
@@ -1241,6 +1348,7 @@ el.canvas.addEventListener("click", (e) => {
     target: imgPt,
   });
   sortControlPoints();
+  state.currentIndicatorVisible = false; // опорная точка зафиксирована — маркер текущей точки на треке больше не нужен
 
   state.armedForClick = false;
   el.armButton.textContent = "Добавить опорную точку";
@@ -1341,6 +1449,12 @@ function removeControlPoint(index) {
 /** Изменение времени уже добавленной опорной точки — двигает её вдоль трека,
  *  не трогая место клика на карте. */
 function retimeControlPoint(index, raw) {
+  if (raw.trim() === "") {
+    // Пустое поле — плейсхолдер уже действующего времени этой точки,
+    // менять нечего: просто возвращаем поле к текущему значению.
+    updateCalibPanel();
+    return;
+  }
   const newIdx = parseTimeStringToIndex(raw);
   if (newIdx === null) {
     showStatus("Неверный формат, используй ММ:СС или Ч:ММ:СС", true);
@@ -1367,24 +1481,192 @@ function retimeControlPoint(index, raw) {
 // ---------- Оформление трека: цвета, прозрачность, толщина ----------
 
 function updateLegendGradient() {
-  el.legendGradient.style.background = paceGradientCss(state.paceColorFast, state.paceColorSlow);
+  el.legendGradient.style.background = paceGradientCss(state.paceColorStops);
 }
 
-el.colorFast.addEventListener("input", () => {
-  state.paceColorFast = el.colorFast.value;
-  updateLegendGradient();
-  render();
+const paceColorInputs = [el.colorStop0, el.colorStop1, el.colorStop2, el.colorStop3];
+paceColorInputs.forEach((inputEl, i) => {
+  inputEl.value = state.paceColorStops[i];
+  inputEl.addEventListener("input", () => {
+    state.paceColorStops[i] = inputEl.value;
+    updateLegendGradient();
+    render();
+  });
 });
-
-el.colorSlow.addEventListener("input", () => {
-  state.paceColorSlow = el.colorSlow.value;
-  updateLegendGradient();
-  render();
-});
-
-el.colorFast.value = state.paceColorFast;
-el.colorSlow.value = state.paceColorSlow;
 updateLegendGradient();
+
+el.resetColorsButton.addEventListener("click", () => {
+  state.paceColorStops = [...DEFAULT_PACE_COLOR_STOPS];
+  paceColorInputs.forEach((inputEl, i) => {
+    inputEl.value = state.paceColorStops[i];
+  });
+  updateLegendGradient();
+  render();
+});
+
+// ---------- Границы шкалы темпа (быстро/медленно) ----------
+//
+// Раньше вся шкала растягивалась АВТОМАТИЧЕСКИ между минимальным и
+// максимальным (95й перцентиль) темпом трека — подстроить границы вручную
+// было нельзя. Теперь, как в QuickRoute, можно самому задать темп,
+// соответствующий самому быстрому (левая граница — первый цвет градиента)
+// и самому медленному (правая граница — последний цвет) участку: ползунком
+// или прямым вводом "мм:сс". Раскраска линии (см. drawRoute) использует
+// именно эти значения, а не сырые min/max из трека — авто-значения из
+// трека остаются лишь стартовой точкой при загрузке нового файла.
+
+/** Диапазон [min,max] секунд/км, в котором имеет смысл двигать ползунки —
+ *  вычисляется из реальных сегментных темпов трека с небольшим запасом по
+ *  краям (иначе крайние значения данных упирались бы в самый край шкалы
+ *  ползунка). */
+function paceSliderRange() {
+  const fallback = { min: 120, max: 900 };
+  if (!state.trackStats) return fallback;
+  const paces = state.trackStats.points
+    .map((p) => p.segPaceSecPerKm)
+    .filter((v) => v !== null && Number.isFinite(v));
+  if (!paces.length) return fallback;
+  const dataMin = Math.min(...paces);
+  const dataMax = Math.max(...paces);
+  const pad = Math.max(15, (dataMax - dataMin) * 0.15);
+  return {
+    min: Math.max(30, Math.floor(dataMin - pad)),
+    max: Math.ceil(dataMax + pad),
+  };
+}
+
+/** Настраивает диапазон ползунков под текущий трек и выставляет исходные
+ *  значения границ шкалы — по умолчанию тот же авто-диапазон, что раньше
+ *  использовался неявно (минимальный темп и 95й перцентиль). Вызывается
+ *  один раз при загрузке нового трека (см. handleTrackFile) — при
+ *  повторной обрезке уже выбранные пользователем границы не сбрасываются. */
+function setupPaceSliders() {
+  const range = paceSliderRange();
+  [el.paceMinSlider, el.paceMaxSlider].forEach((slider) => {
+    slider.min = range.min;
+    slider.max = range.max;
+    slider.step = 5;
+  });
+  state.paceMinSecPerKm = state.trackStats.minPaceSecPerKm ?? range.min;
+  state.paceMaxSecPerKm = state.trackStats.maxPaceSecPerKm ?? range.max;
+  syncPaceBoundsUI();
+}
+
+/** Раздвигает атрибуты min/max самих ползунков, если пользователь вручную
+ *  ввёл через текстовое поле значение за пределами текущего диапазона —
+ *  иначе бегунок визуально "прилипал" бы к краю шкалы, хотя
+ *  state.pace*SecPerKm уже содержит другое, более крайнее значение. */
+function extendPaceSliderBounds(sec) {
+  const lo = Math.min(Number(el.paceMinSlider.min), sec);
+  const hi = Math.max(Number(el.paceMaxSlider.max), sec);
+  el.paceMinSlider.min = lo;
+  el.paceMaxSlider.min = lo;
+  el.paceMinSlider.max = hi;
+  el.paceMaxSlider.max = hi;
+}
+
+/** секунды/км -> "м:сс", без суффикса " /км" (тот, что в formatPace) —
+ *  формат для содержимого текстовых полей ввода границ (тот же стиль, что
+ *  formatElapsed/trimTimeLabel: минуты без ведущего нуля, секунды с ним). */
+function paceToMSS(sec) {
+  if (sec === null || !Number.isFinite(sec)) return "";
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/** Длительность, под которую подбирается ширина маски ввода (мм:сс / ч:мм:сс)
+ *  для полей темпа — берём текущий верхний предел ползунков, как
+ *  trimModalMaxAbsSeconds() берёт длительность всего трека для полей
+ *  обрезки. Именно от неё зависит, после скольких цифр минут маска сама
+ *  проставляет ":" и переходит к секундам. */
+function paceMaskMaxAbsSeconds() {
+  return Number(el.paceMaxSlider.max) || 900;
+}
+
+function syncPaceBoundsUI() {
+  if (state.paceMinSecPerKm === null || state.paceMaxSecPerKm === null) return;
+  el.paceMinSlider.value = Math.round(state.paceMinSecPerKm);
+  el.paceMaxSlider.value = Math.round(state.paceMaxSecPerKm);
+  el.paceMinValue.textContent = formatPace(state.paceMinSecPerKm);
+  el.paceMaxValue.textContent = formatPace(state.paceMaxSecPerKm);
+  const placeholder = zeroTimeMaskLabel(paceMaskMaxAbsSeconds());
+  el.paceMinInput.placeholder = placeholder;
+  el.paceMaxInput.placeholder = placeholder;
+  el.paceMinInput.value = timeInputDisplayValue(paceToMSS(state.paceMinSecPerKm));
+  el.paceMaxInput.value = timeInputDisplayValue(paceToMSS(state.paceMaxSecPerKm));
+}
+
+const PACE_BOUNDS_MIN_GAP = 5; // секунд/км — границы не могут схлопнуться в одну точку
+
+el.paceMinSlider.addEventListener("input", () => {
+  if (state.paceMaxSecPerKm === null) return;
+  const v = Math.min(Number(el.paceMinSlider.value), state.paceMaxSecPerKm - PACE_BOUNDS_MIN_GAP);
+  state.paceMinSecPerKm = Math.max(Number(el.paceMinSlider.min), v);
+  syncPaceBoundsUI();
+  render();
+});
+
+el.paceMaxSlider.addEventListener("input", () => {
+  if (state.paceMinSecPerKm === null) return;
+  const v = Math.max(Number(el.paceMaxSlider.value), state.paceMinSecPerKm + PACE_BOUNDS_MIN_GAP);
+  state.paceMaxSecPerKm = Math.min(Number(el.paceMaxSlider.max), v);
+  syncPaceBoundsUI();
+  render();
+});
+
+/** Ручной ввод левой границы (черновой, при каждой введённой цифре) — как и
+ *  в полях обрезки, обновляет состояние сразу по мере набора через ту же
+ *  маскированную маску мм:сс/ч:мм:сс (attachTimeInputMask ниже), не
+ *  дожидаясь Enter. Само поле при этом не перезаписывается (это сделала бы
+ *  маска сама, если нужно) — ошибки формата тут молча игнорируются,
+ *  reportError включается только из обработчика Enter. */
+function setPaceMinFromInput({ reportError = false } = {}) {
+  if (el.paceMinInput.value.trim() === "") return; // пусто — плейсхолдер уже нулевого значения, менять нечего
+  const sec = maskedInputToSeconds(el.paceMinInput.value, paceMaskMaxAbsSeconds());
+  if (sec === null || sec <= 0) {
+    if (reportError) showStatus("Неверный формат темпа, используй ММ:СС", true);
+    return;
+  }
+  extendPaceSliderBounds(sec);
+  state.paceMinSecPerKm = Math.min(sec, state.paceMaxSecPerKm - PACE_BOUNDS_MIN_GAP);
+  el.paceMinSlider.value = Math.round(state.paceMinSecPerKm);
+  el.paceMinValue.textContent = formatPace(state.paceMinSecPerKm);
+  render();
+}
+
+function setPaceMaxFromInput({ reportError = false } = {}) {
+  if (el.paceMaxInput.value.trim() === "") return;
+  const sec = maskedInputToSeconds(el.paceMaxInput.value, paceMaskMaxAbsSeconds());
+  if (sec === null || sec <= 0) {
+    if (reportError) showStatus("Неверный формат темпа, используй ММ:СС", true);
+    return;
+  }
+  extendPaceSliderBounds(sec);
+  state.paceMaxSecPerKm = Math.max(sec, state.paceMinSecPerKm + PACE_BOUNDS_MIN_GAP);
+  el.paceMaxSlider.value = Math.round(state.paceMaxSecPerKm);
+  el.paceMaxValue.textContent = formatPace(state.paceMaxSecPerKm);
+  render();
+}
+
+attachTimeInputMask(el.paceMinInput, paceMaskMaxAbsSeconds);
+attachTimeInputMask(el.paceMaxInput, paceMaskMaxAbsSeconds);
+
+el.paceMinInput.addEventListener("input", () => setPaceMinFromInput());
+el.paceMinInput.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  setPaceMinFromInput({ reportError: true });
+  el.paceMinInput.value = timeInputDisplayValue(paceToMSS(state.paceMinSecPerKm)); // переформатировать начисто
+  el.paceMinInput.blur();
+});
+
+el.paceMaxInput.addEventListener("input", () => setPaceMaxFromInput());
+el.paceMaxInput.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  setPaceMaxFromInput({ reportError: true });
+  el.paceMaxInput.value = timeInputDisplayValue(paceToMSS(state.paceMaxSecPerKm));
+  el.paceMaxInput.blur();
+});
 
 el.opacitySlider.addEventListener("input", () => {
   // Слайдер показывает "прозрачность": 0% — полностью непрозрачная линия,
@@ -1498,10 +1780,11 @@ function syncTrimModalUI() {
   el.trimModalEndSlider.value = state.trimEndDraft;
   el.trimModalStartValue.textContent = trimTimeLabel(state.trimStartDraft);
   el.trimModalEndValue.textContent = trimTimeLabel(state.trimEndDraft);
-  el.trimModalStartInput.value = trimTimeLabel(state.trimStartDraft);
-  el.trimModalEndInput.value = trimTimeLabel(state.trimEndDraft);
-  syncTimeInputZeroStyle(el.trimModalStartInput);
-  syncTimeInputZeroStyle(el.trimModalEndInput);
+  const placeholder = zeroTimeMaskLabel(trimModalMaxAbsSeconds());
+  el.trimModalStartInput.placeholder = placeholder;
+  el.trimModalEndInput.placeholder = placeholder;
+  el.trimModalStartInput.value = timeInputDisplayValue(trimTimeLabel(state.trimStartDraft));
+  el.trimModalEndInput.value = timeInputDisplayValue(trimTimeLabel(state.trimEndDraft));
 }
 
 /** Открывает модалку обрезки: черновик стартует от уже ПРИМЕНЁННОЙ обрезки
@@ -1573,6 +1856,10 @@ el.trimModalEndSlider.addEventListener("input", () => {
  *  cp-time-input: парсим по мере ввода, но само поле не перезаписываем,
  *  чтобы не сбивать то, что печатает пользователь. */
 function setTrimStartDraftFromInput({ reportError = false } = {}) {
+  if (el.trimModalStartInput.value.trim() === "") {
+    // Пустое поле — плейсхолдер уже действующего черновика, менять нечего.
+    return;
+  }
   const idx = parseTrimTimeStringToIndex(el.trimModalStartInput.value);
   if (idx === null) {
     if (reportError) showStatus("Неверный формат, используй ММ:СС или Ч:ММ:СС", true);
@@ -1585,6 +1872,10 @@ function setTrimStartDraftFromInput({ reportError = false } = {}) {
 }
 
 function setTrimEndDraftFromInput({ reportError = false } = {}) {
+  if (el.trimModalEndInput.value.trim() === "") {
+    // Пустое поле — плейсхолдер уже действующего черновика, менять нечего.
+    return;
+  }
   const idx = parseTrimTimeStringToIndex(el.trimModalEndInput.value);
   if (idx === null) {
     if (reportError) showStatus("Неверный формат, используй ММ:СС или Ч:ММ:СС", true);
@@ -1604,8 +1895,7 @@ el.trimModalStartInput.addEventListener("input", () => setTrimStartDraftFromInpu
 el.trimModalStartInput.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   setTrimStartDraftFromInput({ reportError: true });
-  el.trimModalStartInput.value = trimTimeLabel(state.trimStartDraft); // переформатировать начисто
-  syncTimeInputZeroStyle(el.trimModalStartInput);
+  el.trimModalStartInput.value = timeInputDisplayValue(trimTimeLabel(state.trimStartDraft)); // переформатировать начисто
   el.trimModalStartInput.blur();
 });
 
@@ -1613,8 +1903,7 @@ el.trimModalEndInput.addEventListener("input", () => setTrimEndDraftFromInput())
 el.trimModalEndInput.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   setTrimEndDraftFromInput({ reportError: true });
-  el.trimModalEndInput.value = trimTimeLabel(state.trimEndDraft);
-  syncTimeInputZeroStyle(el.trimModalEndInput);
+  el.trimModalEndInput.value = timeInputDisplayValue(trimTimeLabel(state.trimEndDraft));
   el.trimModalEndInput.blur();
 });
 
@@ -1837,7 +2126,8 @@ function updateCalibPanel() {
   el.timeInput.disabled = !hasTime;
 
   el.trackSliderLabel.textContent = sliderLabelText(state.selectedTrackIndex);
-  el.timeInput.value = elapsedLabel(state.selectedTrackIndex) ?? "";
+  el.timeInput.placeholder = zeroTimeMaskLabel(calibMaxAbsSeconds());
+  el.timeInput.value = timeInputDisplayValue(elapsedLabel(state.selectedTrackIndex));
   renderControlPointList();
 
   el.undoButton.disabled = state.history.length === 0;
@@ -1859,7 +2149,9 @@ function renderControlPointList() {
     const timeInput = document.createElement("input");
     timeInput.type = "text";
     timeInput.className = "cp-time-input";
-    timeInput.value = elapsedLabel(cp.trackIndex) ?? `#${cp.trackIndex}`;
+    timeInput.placeholder = zeroTimeMaskLabel(calibMaxAbsSeconds());
+    const cpLabel = elapsedLabel(cp.trackIndex);
+    timeInput.value = cpLabel === null ? `#${cp.trackIndex}` : timeInputDisplayValue(cpLabel);
     timeInput.disabled = !state.trackStats.points[0].time;
     attachTimeInputMask(timeInput, calibMaxAbsSeconds);
     const commit = () => retimeControlPoint(i, timeInput.value);
@@ -1906,8 +2198,13 @@ el.exportButton.addEventListener("click", () => {
     showStatus("Нечего экспортировать — загрузи карту и трек", true);
     return;
   }
+  // Опорные точки, текущая точка и пульс привязки — служебные маркеры
+  // калибровки, в сохранённой картинке им делать нечего: рисуем чистый
+  // кадр только для экспорта, а затем возвращаем обычный вид на канвасе.
+  render({ includeMarkers: false });
   const link = document.createElement("a");
-  link.download = "tracktomap.png";
+  link.download = "track.png";
   link.href = el.canvas.toDataURL("image/png");
   link.click();
+  render();
 });
