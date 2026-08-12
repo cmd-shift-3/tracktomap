@@ -132,15 +132,37 @@
       <div class="panel-collapse">
         <div class="panel-collapse-inner">
           <div id="legendGradient" class="legend-gradient"></div>
-          <div class="legend-color-row">
+          <div class="legend-color-row legend-color-row-4">
             <label class="color-field">
-              <input type="color" id="colorFast" value="#22c55e" />
+              <input type="color" id="colorStop0" value="#0cdf59" />
               <span>быстро</span>
             </label>
             <label class="color-field">
-              <input type="color" id="colorSlow" value="#ef4444" />
+              <input type="color" id="colorStop1" value="#f6fa00" />
+            </label>
+            <label class="color-field">
+              <input type="color" id="colorStop2" value="#fbad28" />
+            </label>
+            <label class="color-field">
+              <input type="color" id="colorStop3" value="#ff1414" />
               <span>медленно</span>
             </label>
+          </div>
+          <button id="resetColorsButton" class="btn ghost small" type="button" style="margin-bottom: 14px;">Сбросить цвета</button>
+
+          <div class="slider-field">
+            <label class="field-label" for="paceMinSlider">Темп «быстро» <span id="paceMinValue" class="field-value">—</span></label>
+            <input type="range" id="paceMinSlider" min="60" max="900" step="5" value="180" />
+            <div class="time-input-row">
+              <input type="text" id="paceMinInput" placeholder="напр. 4:30" />
+            </div>
+          </div>
+          <div class="slider-field">
+            <label class="field-label" for="paceMaxSlider">Темп «медленно» <span id="paceMaxValue" class="field-value">—</span></label>
+            <input type="range" id="paceMaxSlider" min="60" max="900" step="5" value="600" />
+            <div class="time-input-row">
+              <input type="text" id="paceMaxInput" placeholder="напр. 8:00" />
+            </div>
           </div>
 
           <div class="slider-field">
