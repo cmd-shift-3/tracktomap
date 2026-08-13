@@ -40,6 +40,7 @@ const state = {
   trimStartDraft: 0, // черновые значения слайдеров/полей модалки обрезки — не влияют ни на что, пока не нажата "Применить"
   trimEndDraft: 0,
   mapFileName: null, // имя файла карты — только для статус-сообщения при восстановлении сохранённого состояния
+  mapMimeType: null, // MIME-тип загруженной карты (напр. "image/jpeg") — определяет формат экспорта: JPEG-карта экспортируется в JPEG (см. exportButton), а не в PNG без потерь, который на фотосканах весит в разы больше
   trackFileName: null,
 };
 
@@ -197,20 +198,36 @@ function showStatus(msg, isError = false) {
 
 // ---------- Сохранение состояния (localStorage + IndexedDB) ----------
 //
-// Всё, кроме самого изображения карты, — небольшой JSON (трек, опорные
-// точки, обрезка, стиль линии, зум) — хранится в localStorage под одним
-// ключом. Изображение карты может весить несколько мегабайт (JPG/PNG в base64
-// вышел бы ещё крупнее и localStorage почти наверняка упёрся бы в квоту),
-// поэтому оно хранится ОТДЕЛЬНО как Blob в IndexedDB — там лимиты на
-// порядки больше и Blob не нужно перекодировать в текст.
+// Три уровня хранения, разделённые по тому, как часто они меняются:
+//   1) Изображение карты — Blob в IndexedDB (см. ниже). Весит больше всего,
+//      меняется реже всего (только при загрузке новой карты). IndexedDB —
+//      потому что лимиты там на порядки больше, чем у localStorage, и Blob
+//      не нужно перекодировать в текст (base64 в JSON вышел бы ещё крупнее).
+//   2) Сами точки трека (потенциально тысячи объектов lat/lon/ele/time/hr) —
+//      ОТДЕЛЬНЫЙ ключ localStorage, TRACK_DATA_STORAGE_KEY. Перезаписывается
+//      ТОЛЬКО при загрузке нового файла трека (см. saveTrackDataNow, вызов
+//      из handleTrackFile) — и ничем больше.
+//   3) Всё остальное — опорные точки, обрезка, стиль линии, зум и т.п. —
+//      небольшой JSON в STATE_STORAGE_KEY, который переписывается часто,
+//      через debounce-обёртку scheduleSaveState() (так частые события вроде
+//      перетаскивания слайдера не пишут в localStorage на каждый кадр, а
+//      только один раз после того, как пользователь остановился).
 //
-// Сохранение вызывается после каждого изменяющего действия (загрузка файлов,
-// правка опорных точек, обрезка, стиль, зум) через debounce-обёртку
-// scheduleSaveState() — так частые события (перетаскивание слайдера/бегунка)
-// не пишут в localStorage на каждый кадр, а только один раз после того, как
-// пользователь остановился.
+// Раньше пункты 2 и 3 были ОДНИМ ключом: точки трека пересериализовывались
+// и перезаписывались в localStorage при КАЖДОМ вызове scheduleSaveState —
+// то есть при добавлении каждой новой опорной точки, при любой правке
+// цвета/толщины линии и т.д., хотя сами точки трека при этом ни капли не
+// менялись. Движок хранения браузера не уплотняет место под старые версии
+// значения мгновенно при каждой перезаписи одного и того же ключа — после
+// десятков таких "пустых" перезаписей файл на диске раздувался в разы
+// относительно реального размера данных (на практике: трёхмегабайтная
+// карта + трек, и после расстановки десятка опорных точек суммарный размер
+// сохранённых данных вырастал до ~70МБ). Разделение на два ключа убирает
+// причину: тяжёлые данные трека пишутся один раз и больше не трогаются,
+// пока не загружен новый файл трека.
 
 const STATE_STORAGE_KEY = "tracktomap-state-v1";
+const TRACK_DATA_STORAGE_KEY = "tracktomap-track-v1";
 const MAP_DB_NAME = "tracktomap-db";
 const MAP_DB_STORE = "mapImage";
 const MAP_DB_KEY = "current";
@@ -317,13 +334,34 @@ function scheduleSaveState() {
   saveStateTimer = setTimeout(saveStateNow, SAVE_DEBOUNCE_MS);
 }
 
+/** Пишет трек (имя файла + точки) в ОТДЕЛЬНЫЙ ключ localStorage —
+ *  в отличие от saveStateNow, вызывается не через debounce, а один раз
+ *  сразу после загрузки/разбора файла трека (см. handleTrackFile). Это и
+ *  есть то самое разделение, которое устраняет раздувание хранилища —
+ *  см. комментарий в начале раздела "Сохранение состояния" выше. */
+function saveTrackDataNow() {
+  try {
+    if (!state.trackRaw) {
+      localStorage.removeItem(TRACK_DATA_STORAGE_KEY);
+      return;
+    }
+    const payload = {
+      version: 1,
+      trackFileName: state.trackFileName,
+      trackPoints: serializeTrackPoints(state.trackRaw),
+    };
+    localStorage.setItem(TRACK_DATA_STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    // localStorage недоступен (приватный режим) или переполнен квотой —
+    // не критично, просто продолжаем работать без сохранения трека.
+  }
+}
+
 function saveStateNow() {
   saveStateTimer = null;
   try {
     const payload = {
       version: 1,
-      trackFileName: state.trackFileName,
-      trackPoints: state.trackRaw ? serializeTrackPoints(state.trackRaw) : null,
       controlPoints: state.controlPoints.map((cp) => ({
         trackIndex: cp.trackIndex,
         target: { x: cp.target.x, y: cp.target.y },
@@ -342,6 +380,7 @@ function saveStateNow() {
       routeOutlineWidth: state.routeOutlineWidth,
       hasMapImage: !!state.mapImage,
       mapFileName: state.mapFileName,
+      mapMimeType: state.mapMimeType,
     };
     localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(payload));
   } catch (e) {
@@ -356,6 +395,7 @@ function saveStateNow() {
 function clearSavedState() {
   try {
     localStorage.removeItem(STATE_STORAGE_KEY);
+    localStorage.removeItem(TRACK_DATA_STORAGE_KEY);
   } catch (e) {
     // игнорируем
   }
@@ -374,19 +414,30 @@ async function restoreStateFromStorage() {
   } catch (e) {
     saved = null;
   }
+
+  // Точки трека читаются из отдельного ключа — см. TRACK_DATA_STORAGE_KEY /
+  // saveTrackDataNow выше.
+  let trackData = null;
+  try {
+    const rawTrack = localStorage.getItem(TRACK_DATA_STORAGE_KEY);
+    if (rawTrack) trackData = JSON.parse(rawTrack);
+  } catch (e) {
+    trackData = null;
+  }
+
   if (!saved || typeof saved !== "object") return;
 
   let restoredTrack = false;
   let restoredMap = false;
 
-  // ---- Трек ----
-  if (Array.isArray(saved.trackPoints) && saved.trackPoints.length > 0) {
+  // ---- Трек (хранится отдельно от общего состояния — см. saveTrackDataNow) ----
+  if (trackData && Array.isArray(trackData.trackPoints) && trackData.trackPoints.length > 0) {
     try {
-      const points = deserializeTrackPoints(saved.trackPoints);
+      const points = deserializeTrackPoints(trackData.trackPoints);
       const maxIdx = points.length - 1;
 
       state.trackRaw = points;
-      state.trackFileName = saved.trackFileName || null;
+      state.trackFileName = trackData.trackFileName || null;
       state.trackStats = computeTrackStats(points);
       state.projection = makeProjection(points[0].lat, points[0].lon);
 
@@ -457,6 +508,10 @@ async function restoreStateFromStorage() {
       if (blob) {
         state.mapImage = await loadImageBlob(blob);
         state.mapFileName = saved.mapFileName || null;
+        // blob.type — это MIME из самого File/Blob (сохраняется при записи
+        // в IndexedDB), поэтому он надёжнее, чем то, что записано в JSON;
+        // saved.mapMimeType — фоллбек на случай, если у Blob он пуст.
+        state.mapMimeType = blob.type || saved.mapMimeType || null;
         restoredMap = true;
       }
     } catch (e) {
@@ -511,6 +566,7 @@ async function handleMapFile(file) {
     const img = await loadImageFile(file);
     state.mapImage = img;
     state.mapFileName = file.name;
+    state.mapMimeType = guessImageMimeType(file);
     state.zoomLevel = 1;
     el.layoutMain.classList.remove("no-map");
     document.body.classList.remove("no-map");
@@ -549,6 +605,7 @@ async function handleTrackFile(file) {
     updateTrackDependentPanelsVisibility();
     render();
     showStatus(`Трек загружен: ${file.name} (${points.length} точек)`);
+    saveTrackDataNow(); // тяжёлые точки трека — сразу и один раз, не через debounce (см. комментарий у функции)
     scheduleSaveState();
     openTrimModal(); // сразу спрашиваем про обрезку, пока пользователь ещё держит контекст загрузки в голове
   } catch (err) {
@@ -598,6 +655,19 @@ function isImageFile(file) {
 }
 function isTrackFile(file) {
   return /\.(gpx|tcx)$/i.test(file.name);
+}
+
+/** file.type иногда пустой (некоторые источники drag-and-drop не проставляют
+ *  его) — тогда определяем MIME по расширению имени файла. Нужно для
+ *  выбора формата экспорта (см. exportButton) — картинка карты грузится
+ *  через <img>, который сам по себе своего исходного MIME не хранит. */
+function guessImageMimeType(file) {
+  if (file.type) return file.type;
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".webp")) return "image/webp";
+  return "";
 }
 
 // Перетаскивание файла работает над всей областью карты — и до, и после
@@ -2525,6 +2595,44 @@ function setZoom(z) {
   scheduleSaveState();
 }
 
+/** То же самое изменение зума, что и setZoom, но с сохранением на месте
+ *  точки карты, которая была под курсором (clientX/clientY — координаты
+ *  курсора в системе окна, как в событии wheel/mouse). Без этого зум растёт
+ *  от canvas-элемента "как есть": браузер увеличивает канвас, а левый
+ *  верхний угол (в системе координат прокручиваемого .canvas-area) остаётся
+ *  на месте — визуально выглядит так, будто карта "зумится в угол", а не
+ *  туда, где стоит курсор, и после пары шагов зума нужная область карты
+ *  уезжает за пределы экрана.
+ *
+ *  Компенсация в три шага:
+ *    1) ДО изменения масштаба — переводим позицию курсора (в CSS-пикселях
+ *       канваса) в координаты изображения через canvasToImg (использует
+ *       ЕЩЁ старый state.canvasScale) — это и есть точка карты "под
+ *       курсором", которую нужно сохранить на месте.
+ *    2) Меняем zoomLevel и пересчитываем размер канваса (applyCanvasSize) —
+ *       state.canvasScale становится новым.
+ *    3) Переводим ту же точку изображения обратно в CSS-пиксели канваса
+ *       через imgToCanvas (уже с НОВЫМ canvasScale) и сравниваем, где она
+ *       оказалась на экране, с тем, где был курсор изначально — разница и
+ *       есть то, на сколько нужно докрутить .canvas-area, чтобы точка
+ *       вернулась под курсор. */
+function setZoomAtPoint(z, clientX, clientY) {
+  const oldRect = el.canvas.getBoundingClientRect();
+  const imgPt = canvasToImg({ x: clientX - oldRect.left, y: clientY - oldRect.top });
+
+  state.zoomLevel = clampZoom(z);
+  applyCanvasSize();
+
+  const newRect = el.canvas.getBoundingClientRect(); // тот же скролл, уже новый размер канваса
+  const newCanvasPt = imgToCanvas(imgPt);
+  el.canvasArea.scrollLeft += newRect.left + newCanvasPt.x - clientX;
+  el.canvasArea.scrollTop += newRect.top + newCanvasPt.y - clientY;
+
+  syncZoomUI();
+  render();
+  scheduleSaveState();
+}
+
 el.zoomSlider.addEventListener("input", () => {
   setZoom(Number(el.zoomSlider.value) / 100);
 });
@@ -2536,13 +2644,15 @@ el.zoomResetButton.addEventListener("click", () => {
 // Ctrl/Cmd + колесо мыши — зум по карте (как в большинстве картографических
 // сервисов); обычная прокрутка колесом/тачпадом при этом не перехватывается
 // и продолжает штатно прокручивать .canvas-area по вертикали/горизонтали.
+// Зумим именно к точке под курсором (setZoomAtPoint), а не к canvas-у "как
+// есть" (setZoom) — иначе при зуме колесом карта визуально "уезжает" в угол.
 el.canvas.addEventListener(
   "wheel",
   (e) => {
     if (!state.mapImage || !(e.ctrlKey || e.metaKey)) return;
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    setZoom(state.zoomLevel * factor);
+    setZoomAtPoint(state.zoomLevel * factor, e.clientX, e.clientY);
   },
   { passive: false }
 );
@@ -2837,9 +2947,21 @@ el.exportButton.addEventListener("click", () => {
   // калибровки, в сохранённой картинке им делать нечего: рисуем чистый
   // кадр только для экспорта, а затем возвращаем обычный вид на канвасе.
   render({ includeMarkers: false });
+
+  // Экспортируем в том же формате, что и исходная карта. PNG — без потерь,
+  // и для фотографического скана (обычно JPEG) это раздувает файл в разы
+  // против исходного веса, хотя визуально разница на линии трека
+  // незаметна. Поэтому JPEG-карту (и любую другую, кроме PNG) сохраняем
+  // тоже в JPEG с фиксированным высоким качеством; PNG-карту (там бывает
+  // важна прозрачность) — как и раньше, в PNG без потерь.
+  const isPng = state.mapMimeType === "image/png";
+  const mime = isPng ? "image/png" : "image/jpeg";
+  const quality = isPng ? undefined : 0.92;
+  const ext = isPng ? "png" : "jpg";
+
   const link = document.createElement("a");
-  link.download = "track.png";
-  link.href = el.canvas.toDataURL("image/png");
+  link.download = `track.${ext}`;
+  link.href = el.canvas.toDataURL(mime, quality);
   link.click();
   render();
 });
@@ -2889,6 +3011,7 @@ function clearAllData() {
   state.trimStartDraft = 0;
   state.trimEndDraft = 0;
   state.mapFileName = null;
+  state.mapMimeType = null;
   state.trackFileName = null;
 
   // Возврат UI к начальному экрану (дропзона).
