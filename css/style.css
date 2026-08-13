@@ -723,6 +723,13 @@ input[type="range"] {
   overflow: hidden;
   background: #0b0f12;
   box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  /* На тач-устройствах разрешаем только панорамирование (скролл контейнера
+     .canvas-area), но не нативный pinch/double-tap zoom браузера — в
+     приложении уже есть свой ползунок масштаба, а двойной тап зарезервирован
+     под быструю привязку опорной точки (см. app.js: dblclick на canvas).
+     Без этого на iOS/Android двойной тап по карте зумил бы страницу вместо
+     срабатывания dblclick. */
+  touch-action: manipulation;
 }
 
 /* На стартовом экране окошко дропзоны — единственный элемент, поэтому
@@ -751,6 +758,7 @@ input[type="range"] {
 canvas {
   display: block;
   cursor: grab; /* дефолт для панорамирования зажатой мышью; JS переключает на crosshair/grabbing по ситуации */
+  touch-action: manipulation; /* см. .canvas-wrap выше — события тача стартуют именно на этом элементе */
 }
 
 /* Перекрестие (см. app.js: drawCrosshairOverlay) рисуется на отдельном
@@ -813,6 +821,13 @@ canvas {
 
 @media (max-width: 800px) {
   html, body { height: auto; }
+  /* На десктопе прокручиваются только .sidebar и .canvas-area по отдельности
+     (body: overflow:hidden), чтобы карта и сайдбар вели себя как две
+     независимые панели высотой в экран. На мобильных экрана заметно меньше,
+     а контента (карта + все панели сайдбара) — заметно больше, поэтому
+     удобнее один общий скролл всей страницы, а не две вложенные
+     прокручиваемые зоны — так пользователь может просто листать пальцем
+     сверху вниз, не гадая, в какой из двух зон сейчас находится палец. */
   body { overflow: visible; display: block; }
   .layout {
     grid-template-columns: 1fr;
@@ -821,7 +836,60 @@ canvas {
     height: auto;
     overflow: visible;
   }
-  .sidebar { border-right: none; border-bottom: 1px solid var(--border); overflow-y: visible; }
+
+  /* Карта — главный объект внимания, поэтому на мобильном экране она идёт
+     ПЕРВОЙ (order), а все панели настройки — под ней, хотя в разметке
+     .sidebar по-прежнему стоит раньше .canvas-area (порядок в DOM важен для
+     доступности/табуляции, а визуальный порядок здесь — только CSS). */
+  .canvas-area { order: 1; padding: 14px 12px; }
+  .sidebar {
+    order: 2;
+    border-right: none;
+    border-bottom: none;
+    overflow-y: visible;
+    padding: 14px 12px 24px;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 10px 12px;
+  }
+  .topbar-actions { flex-wrap: wrap; gap: 8px; }
+  .file-btn { font-size: 11.5px; padding: 9px 12px; } /* чуть выше по вертикали — под палец, а не под курсор мыши */
+
+  /* Текстовые поля ввода — минимум 16px, иначе Mobile Safari интерпретирует
+     фокус на поле с меньшим шрифтом как "пользователю плохо видно" и сам
+     зумит всю страницу при открытии клавиатуры (стандартное поведение
+     iOS, которое никак нельзя выключить иначе, кроме как из самого CSS
+     поля). Это не про эстетику, а про то, чтобы страница вообще не
+     дёргалась при каждом тапе в поле времени/темпа. */
+  .time-input-row input[type="text"],
+  .dual-range-input-group input[type="text"],
+  .control-point-list .cp-time-input {
+    font-size: 16px;
+  }
+  .control-point-list .cp-time-input { padding: 6px 6px; }
+
+  /* Увеличенные тап-зоны для мелких иконочных кнопок — 44px считается
+     минимальным комфортным размером цели под палец (рекомендация Apple/
+     Google HIG), исходные ~24-28px были рассчитаны под точный клик мышью. */
+  .control-point-list li { padding: 8px 8px; gap: 8px; }
+  .control-point-list button { padding: 8px; }
+  .control-point-list .cp-move-btn svg,
+  .control-point-list .cp-delete-btn { font-size: 14px; }
+
+  .calib-actions .btn.icon-btn { width: 44px; padding: 12px 0; }
+  .btn { padding: 12px 12px; }
+
+  /* Ползунок с двумя бегунками (границы шкалы темпа) — бегунки крупнее,
+     чтобы их можно было зацепить пальцем, не задевая соседний. */
+  .dual-range { height: 30px; margin: 10px 10px 0 4px; }
+  .dual-range-thumb { width: 26px; height: 26px; margin-left: -13px; }
+
+  .icon-btn-square, .theme-toggle { width: 40px; height: 40px; }
+
+  .modal-box { padding: 18px; }
 }
 
 /* ---------- Анимация смены темы ---------- */
@@ -912,4 +980,28 @@ canvas {
 }
 .modal-box .hint {
   margin: 0 0 16px;
+}
+/* ---------- Кнопка полной очистки (корзина) в шапке ---------- */
+/* Тот же визуальный язык, что у .theme-toggle — квадратная кнопка-иконка
+   в шапке, но без кроссфейда солнце/луна: тут всегда одна и та же иконка
+   корзины, хватает обычного transition на border-color/color. Акцент при
+   наведении — красный (accent-red), а не амбер, как намёк на деструктивность
+   действия (в отличие от остальных кнопок шапки). */
+.icon-btn-square {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.icon-btn-square:hover {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
 }
