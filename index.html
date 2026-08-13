@@ -124,6 +124,29 @@
       </div>
     </section>
 
+    <section id="stylePanel" class="panel hidden collapsible">
+      <button type="button" id="styleToggleButton" class="panel-toggle" aria-expanded="true">
+        <h2>Линия</h2>
+        <span class="chevron">▾</span>
+      </button>
+      <div class="panel-collapse">
+        <div class="panel-collapse-inner">
+          <div class="slider-field">
+            <label class="field-label" for="opacitySlider">Прозрачность линии <span id="opacityValue" class="field-value">30%</span></label>
+            <input type="range" id="opacitySlider" min="0" max="90" step="5" value="30" />
+          </div>
+          <div class="slider-field">
+            <label class="field-label" for="widthSlider">Толщина линии <span id="widthValue" class="field-value">4 px</span></label>
+            <input type="range" id="widthSlider" min="1" max="14" step="1" value="4" />
+          </div>
+          <div class="slider-field">
+            <label class="field-label" for="outlineSlider">Обводка <span id="outlineValue" class="field-value">0.5 px</span></label>
+            <input type="range" id="outlineSlider" min="0" max="3" step="0.1" value="0.5" />
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section id="legendPanel" class="panel legend hidden collapsible collapsed">
       <button type="button" id="legendToggleButton" class="panel-toggle" aria-expanded="false">
         <h2>Темп</h2>
@@ -135,7 +158,6 @@
           <div class="legend-color-row legend-color-row-4">
             <label class="color-field">
               <input type="color" id="colorStop0" value="#0cdf59" />
-              <span>быстро</span>
             </label>
             <label class="color-field">
               <input type="color" id="colorStop1" value="#f6fa00" />
@@ -145,34 +167,36 @@
             </label>
             <label class="color-field">
               <input type="color" id="colorStop3" value="#ff1414" />
-              <span>медленно</span>
             </label>
           </div>
           <button id="resetColorsButton" class="btn ghost small" type="button" style="margin-bottom: 14px;">Сбросить цвета</button>
 
           <div class="slider-field">
-            <label class="field-label" for="paceMinSlider">Темп «быстро» <span id="paceMinValue" class="field-value">—</span></label>
-            <input type="range" id="paceMinSlider" min="60" max="900" step="5" value="180" />
-            <div class="time-input-row">
-              <input type="text" id="paceMinInput" placeholder="напр. 4:30" />
+            <label class="field-label">Темп</label>
+            <div id="paceDualRange" class="dual-range">
+              <div class="dual-range-track"></div>
+              <div id="paceDualRangeFill" class="dual-range-fill"></div>
+              <div id="paceMinThumb" class="dual-range-thumb" tabindex="0" role="slider" aria-label="Темп «быстро»" aria-valuemin="0" aria-valuemax="100"></div>
+              <div id="paceMaxThumb" class="dual-range-thumb" tabindex="0" role="slider" aria-label="Темп «медленно»" aria-valuemin="0" aria-valuemax="100"></div>
             </div>
-          </div>
-          <div class="slider-field">
-            <label class="field-label" for="paceMaxSlider">Темп «медленно» <span id="paceMaxValue" class="field-value">—</span></label>
-            <input type="range" id="paceMaxSlider" min="60" max="900" step="5" value="600" />
-            <div class="time-input-row">
-              <input type="text" id="paceMaxInput" placeholder="напр. 8:00" />
+            <div class="dual-range-inputs">
+              <div class="dual-range-input-group">
+                <label class="field-label" for="paceMinInput">Быстро</label>
+                <div class="input-with-suffix">
+                  <input type="text" id="paceMinInput" placeholder="напр. 4:30" />
+                  <span class="input-suffix">/км</span>
+                </div>
+              </div>
+              <div class="dual-range-input-group">
+                <label class="field-label" for="paceMaxInput">Медленно</label>
+                <div class="input-with-suffix">
+                  <input type="text" id="paceMaxInput" placeholder="напр. 8:00" />
+                  <span class="input-suffix">/км</span>
+                </div>
+              </div>
             </div>
           </div>
 
-          <div class="slider-field">
-            <label class="field-label" for="opacitySlider">Прозрачность линии <span id="opacityValue" class="field-value">30%</span></label>
-            <input type="range" id="opacitySlider" min="0" max="90" step="5" value="30" />
-          </div>
-          <div class="slider-field">
-            <label class="field-label" for="widthSlider">Толщина линии <span id="widthValue" class="field-value">4 px</span></label>
-            <input type="range" id="widthSlider" min="1" max="14" step="1" value="4" />
-          </div>
         </div>
       </div>
     </section>
@@ -182,6 +206,7 @@
   <section class="canvas-area" id="canvasArea">
     <div id="canvasWrap" class="canvas-wrap">
       <canvas id="canvas"></canvas>
+      <canvas id="crosshairCanvas" class="crosshair-canvas"></canvas>
       <div id="emptyState" class="empty-state">
         <p class="empty-title">Перетащи сюда файлы, чтобы начать</p>
         <p class="empty-hint">карта — JPG/PNG, трек — GPX/TCX</p>
