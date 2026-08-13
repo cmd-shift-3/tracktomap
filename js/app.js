@@ -39,6 +39,8 @@ const state = {
   trimEnd: 0, // индекс точки трека — конец ПРИМЕНЁННОЙ обрезки
   trimStartDraft: 0, // черновые значения слайдеров/полей модалки обрезки — не влияют ни на что, пока не нажата "Применить"
   trimEndDraft: 0,
+  mapFileName: null, // имя файла карты — только для статус-сообщения при восстановлении сохранённого состояния
+  trackFileName: null,
 };
 
 const el = {
@@ -102,6 +104,7 @@ const el = {
 
 el.themeToggleButton = document.getElementById("themeToggleButton");
 el.crosshairCanvas = document.getElementById("crosshairCanvas");
+el.clearAllButton = document.getElementById("clearAllButton");
 
 const ctx = el.canvas.getContext("2d");
 const crosshairCtx = el.crosshairCanvas.getContext("2d");
@@ -192,12 +195,322 @@ function showStatus(msg, isError = false) {
   el.statusMsg.classList.toggle("visible", !!msg);
 }
 
+// ---------- Сохранение состояния (localStorage + IndexedDB) ----------
+//
+// Всё, кроме самого изображения карты, — небольшой JSON (трек, опорные
+// точки, обрезка, стиль линии, зум) — хранится в localStorage под одним
+// ключом. Изображение карты может весить несколько мегабайт (JPG/PNG в base64
+// вышел бы ещё крупнее и localStorage почти наверняка упёрся бы в квоту),
+// поэтому оно хранится ОТДЕЛЬНО как Blob в IndexedDB — там лимиты на
+// порядки больше и Blob не нужно перекодировать в текст.
+//
+// Сохранение вызывается после каждого изменяющего действия (загрузка файлов,
+// правка опорных точек, обрезка, стиль, зум) через debounce-обёртку
+// scheduleSaveState() — так частые события (перетаскивание слайдера/бегунка)
+// не пишут в localStorage на каждый кадр, а только один раз после того, как
+// пользователь остановился.
+
+const STATE_STORAGE_KEY = "tracktomap-state-v1";
+const MAP_DB_NAME = "tracktomap-db";
+const MAP_DB_STORE = "mapImage";
+const MAP_DB_KEY = "current";
+
+function openMapDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("IndexedDB недоступен"));
+      return;
+    }
+    const req = indexedDB.open(MAP_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(MAP_DB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveMapImageBlob(blob) {
+  const db = await openMapDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MAP_DB_STORE, "readwrite");
+    tx.objectStore(MAP_DB_STORE).put(blob, MAP_DB_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function loadMapImageBlob() {
+  const db = await openMapDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MAP_DB_STORE, "readonly");
+    const req = tx.objectStore(MAP_DB_STORE).get(MAP_DB_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function clearMapImageBlob() {
+  const db = await openMapDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MAP_DB_STORE, "readwrite");
+    tx.objectStore(MAP_DB_STORE).delete(MAP_DB_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Превращает Blob изображения обратно в загруженный HTMLImageElement —
+ *  зеркало loadImageFile(file) ниже, только источник не File, а Blob из
+ *  IndexedDB. Объектный URL можно освободить сразу после onload — декодированные
+ *  пиксели к этому моменту уже скопированы в сам элемент <img>. */
+function loadImageBlob(blob) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(blob);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("не удалось загрузить сохранённую карту"));
+    };
+    img.src = url;
+  });
+}
+
+function serializeTrackPoints(points) {
+  return points.map((p) => ({
+    lat: p.lat,
+    lon: p.lon,
+    ele: p.ele,
+    time: p.time ? p.time.toISOString() : null,
+    hr: p.hr,
+  }));
+}
+
+function deserializeTrackPoints(arr) {
+  return arr.map((p) => ({
+    lat: p.lat,
+    lon: p.lon,
+    ele: p.ele != null ? p.ele : null,
+    time: p.time ? new Date(p.time) : null,
+    hr: p.hr != null ? p.hr : null,
+  }));
+}
+
+function clampInt(v, min, max) {
+  if (!Number.isFinite(v)) return min;
+  return Math.min(max, Math.max(min, Math.round(v)));
+}
+
+let saveStateTimer = null;
+
+/** Debounce-обёртка — вызывать после ЛЮБОГО изменения, которое должно
+ *  переживать перезагрузку страницы. Реальная запись откладывается на
+ *  SAVE_DEBOUNCE_MS: серия быстрых вызовов (например, перетаскивание
+ *  слайдера) схлопывается в одну запись после того, как действия прекратились. */
+const SAVE_DEBOUNCE_MS = 400;
+function scheduleSaveState() {
+  if (saveStateTimer) clearTimeout(saveStateTimer);
+  saveStateTimer = setTimeout(saveStateNow, SAVE_DEBOUNCE_MS);
+}
+
+function saveStateNow() {
+  saveStateTimer = null;
+  try {
+    const payload = {
+      version: 1,
+      trackFileName: state.trackFileName,
+      trackPoints: state.trackRaw ? serializeTrackPoints(state.trackRaw) : null,
+      controlPoints: state.controlPoints.map((cp) => ({
+        trackIndex: cp.trackIndex,
+        target: { x: cp.target.x, y: cp.target.y },
+      })),
+      trimStart: state.trimStart,
+      trimEnd: state.trimEnd,
+      selectedTrackIndex: state.selectedTrackIndex,
+      zoomLevel: state.zoomLevel,
+      paceColorStops: state.paceColorStops,
+      paceMinSecPerKm: state.paceMinSecPerKm,
+      paceMaxSecPerKm: state.paceMaxSecPerKm,
+      paceBoundsMin: state.paceBoundsMin,
+      paceBoundsMax: state.paceBoundsMax,
+      routeOpacity: state.routeOpacity,
+      routeWidth: state.routeWidth,
+      routeOutlineWidth: state.routeOutlineWidth,
+      hasMapImage: !!state.mapImage,
+      mapFileName: state.mapFileName,
+    };
+    localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    // localStorage недоступен (приватный режим) или переполнен квотой —
+    // это не критично, просто продолжаем работать без сохранения.
+  }
+}
+
+/** Полный сброс сохранённого состояния — используется, если восстановление
+ *  само оказалось повреждённым/несовместимым, чтобы битые данные не мешали
+ *  на каждой следующей загрузке страницы. */
+function clearSavedState() {
+  try {
+    localStorage.removeItem(STATE_STORAGE_KEY);
+  } catch (e) {
+    // игнорируем
+  }
+  clearMapImageBlob().catch(() => {});
+}
+
+/** Восстанавливает сохранённое состояние при старте приложения. Вызывается
+ *  один раз в самом конце файла, когда все элементы UI и функции уже
+ *  объявлены. Ничего не делает, если сохранённых данных нет или они
+ *  повреждены/устарели. */
+async function restoreStateFromStorage() {
+  let saved = null;
+  try {
+    const raw = localStorage.getItem(STATE_STORAGE_KEY);
+    if (raw) saved = JSON.parse(raw);
+  } catch (e) {
+    saved = null;
+  }
+  if (!saved || typeof saved !== "object") return;
+
+  let restoredTrack = false;
+  let restoredMap = false;
+
+  // ---- Трек ----
+  if (Array.isArray(saved.trackPoints) && saved.trackPoints.length > 0) {
+    try {
+      const points = deserializeTrackPoints(saved.trackPoints);
+      const maxIdx = points.length - 1;
+
+      state.trackRaw = points;
+      state.trackFileName = saved.trackFileName || null;
+      state.trackStats = computeTrackStats(points);
+      state.projection = makeProjection(points[0].lat, points[0].lon);
+
+      state.trimStart = clampInt(saved.trimStart, 0, maxIdx);
+      state.trimEnd = clampInt(saved.trimEnd, state.trimStart, maxIdx);
+      if (state.trimEnd <= state.trimStart && maxIdx > 0) {
+        state.trimEnd = maxIdx; // сохранённая обрезка повреждена/вырождена — берём весь трек целиком
+        state.trimStart = 0;
+      }
+      state.selectedTrackIndex = clampInt(saved.selectedTrackIndex, state.trimStart, state.trimEnd);
+
+      state.controlPoints = [];
+      if (Array.isArray(saved.controlPoints)) {
+        for (const cp of saved.controlPoints) {
+          if (
+            !cp ||
+            !Number.isInteger(cp.trackIndex) ||
+            cp.trackIndex < 0 ||
+            cp.trackIndex > maxIdx ||
+            !cp.target ||
+            !Number.isFinite(cp.target.x) ||
+            !Number.isFinite(cp.target.y)
+          ) {
+            continue;
+          }
+          const p = points[cp.trackIndex];
+          state.controlPoints.push({
+            trackIndex: cp.trackIndex,
+            source: state.projection.toMeters(p.lat, p.lon),
+            target: { x: cp.target.x, y: cp.target.y },
+          });
+        }
+        sortControlPoints();
+      }
+      resetControlPointHistory();
+      recomputeModel();
+
+      // Границы шкалы темпа: сначала обычный авто-расчёт по треку (как при
+      // первой загрузке), затем поверх — сохранённые пользовательские
+      // значения, если они были.
+      setupPaceSliders();
+      if (Number.isFinite(saved.paceMinSecPerKm)) state.paceMinSecPerKm = saved.paceMinSecPerKm;
+      if (Number.isFinite(saved.paceMaxSecPerKm)) state.paceMaxSecPerKm = saved.paceMaxSecPerKm;
+      if (Number.isFinite(saved.paceBoundsMin)) state.paceBoundsMin = Math.min(state.paceBoundsMin, saved.paceBoundsMin);
+      if (Number.isFinite(saved.paceBoundsMax)) state.paceBoundsMax = Math.max(state.paceBoundsMax, saved.paceBoundsMax);
+
+      restoredTrack = true;
+    } catch (e) {
+      state.trackRaw = null;
+      state.trackStats = null;
+      state.projection = null;
+    }
+  }
+
+  // ---- Стиль линии (применяется независимо от того, восстановился ли трек) ----
+  if (Array.isArray(saved.paceColorStops) && saved.paceColorStops.length === DEFAULT_PACE_COLOR_STOPS.length) {
+    state.paceColorStops = saved.paceColorStops.slice();
+  }
+  if (Number.isFinite(saved.routeOpacity)) state.routeOpacity = saved.routeOpacity;
+  if (Number.isFinite(saved.routeWidth)) state.routeWidth = saved.routeWidth;
+  if (Number.isFinite(saved.routeOutlineWidth)) state.routeOutlineWidth = saved.routeOutlineWidth;
+  if (Number.isFinite(saved.zoomLevel)) state.zoomLevel = clampZoom(saved.zoomLevel);
+
+  // ---- Карта ----
+  if (saved.hasMapImage) {
+    try {
+      const blob = await loadMapImageBlob();
+      if (blob) {
+        state.mapImage = await loadImageBlob(blob);
+        state.mapFileName = saved.mapFileName || null;
+        restoredMap = true;
+      }
+    } catch (e) {
+      // Карта не восстановилась (например, IndexedDB недоступен в приватном
+      // режиме) — остальное состояние всё равно применяем.
+    }
+  }
+
+  // ---- Применяем восстановленное состояние к UI ----
+  if (restoredMap) {
+    el.layoutMain.classList.remove("no-map");
+    document.body.classList.remove("no-map");
+    fitCanvasToContainer(); // применит уже восстановленный state.zoomLevel поверх пересчитанного fitScale
+    el.emptyState.classList.add("hidden");
+    el.zoomPanel.classList.remove("hidden");
+    syncZoomUI();
+  }
+
+  if (restoredTrack) {
+    updateTrackDependentPanelsVisibility();
+
+    paceColorInputs.forEach((inputEl, i) => {
+      inputEl.value = state.paceColorStops[i];
+    });
+    updateLegendGradient();
+
+    el.opacitySlider.value = Math.round((1 - state.routeOpacity) * 100);
+    el.opacityValue.textContent = `${el.opacitySlider.value}%`;
+    el.widthSlider.value = state.routeWidth;
+    el.widthValue.textContent = `${state.routeWidth} px`;
+    el.outlineSlider.value = state.routeOutlineWidth;
+    el.outlineValue.textContent = `${state.routeOutlineWidth} px`;
+
+    syncPaceBoundsUI();
+    updateStatsPanel();
+    updateCalibPanel();
+  }
+
+  if (restoredMap || restoredTrack) {
+    render();
+    const parts = [];
+    if (restoredMap) parts.push(state.mapFileName ? `карта «${state.mapFileName}»` : "карта");
+    if (restoredTrack) parts.push(state.trackFileName ? `трек «${state.trackFileName}»` : "трек");
+    showStatus(`Восстановлено сохранённое состояние: ${parts.join(", ")}`);
+  }
+}
+
 // ---------- Загрузка файлов ----------
 
 async function handleMapFile(file) {
   try {
     const img = await loadImageFile(file);
     state.mapImage = img;
+    state.mapFileName = file.name;
     state.zoomLevel = 1;
     el.layoutMain.classList.remove("no-map");
     document.body.classList.remove("no-map");
@@ -208,6 +521,8 @@ async function handleMapFile(file) {
     syncZoomUI();
     updateTrackDependentPanelsVisibility();
     showStatus(`Карта загружена: ${file.name} (${img.naturalWidth}×${img.naturalHeight})`);
+    saveMapImageBlob(file).catch(() => {}); // сохраняем как есть, без перекодирования — file уже Blob
+    scheduleSaveState();
   } catch (err) {
     showStatus("Не удалось загрузить изображение карты: " + err.message, true);
   }
@@ -218,6 +533,7 @@ async function handleTrackFile(file) {
     const text = await file.text();
     const points = parseTrackFile(text, file.name);
     state.trackRaw = points;
+    state.trackFileName = file.name;
     state.trackStats = computeTrackStats(points);
     state.projection = makeProjection(points[0].lat, points[0].lon);
     state.controlPoints = [];
@@ -233,6 +549,7 @@ async function handleTrackFile(file) {
     updateTrackDependentPanelsVisibility();
     render();
     showStatus(`Трек загружен: ${file.name} (${points.length} точек)`);
+    scheduleSaveState();
     openTrimModal(); // сразу спрашиваем про обрезку, пока пользователь ещё держит контекст загрузки в голове
   } catch (err) {
     showStatus("Не удалось загрузить трек: " + err.message, true);
@@ -334,14 +651,33 @@ function loadImageFile(file) {
 // ctx.setTransform(dpr,...) — дальше весь остальной код рисует как обычно,
 // в CSS-пикселях, а браузер сам выдаёт чёткую картинку.
 
-function computeFitScale() {
-  const containerPaddingX = 48; // .canvas-area: padding-left/right 24px
-  const reservedVertical = 150; // топбар + вертикальные отступы + строка статуса
-  const availW = Math.max(240, el.canvasArea.clientWidth - containerPaddingX);
-  const availH = Math.max(240, window.innerHeight - reservedVertical);
+const MOBILE_LAYOUT_QUERY = "(max-width: 800px)"; // должно совпадать с брейкпоинтом в style.css
 
+function isMobileLayout() {
+  return window.matchMedia(MOBILE_LAYOUT_QUERY).matches;
+}
+
+function computeFitScale() {
   const natW = state.mapImage.naturalWidth;
   const natH = state.mapImage.naturalHeight;
+
+  const mobile = isMobileLayout();
+  // .canvas-area: padding-left/right — 12px на мобильных (см. style.css), 24px на десктопе.
+  const containerPaddingX = mobile ? 24 : 48;
+  const availW = Math.max(240, el.canvasArea.clientWidth - containerPaddingX);
+
+  // На десктопе .canvas-area — единственная прокручиваемая зона экрана
+  // (body: overflow:hidden), поэтому карту нужно зажать по высоте окна, иначе
+  // она вылезет за пределы видимой области. На мобильных вся страница
+  // скроллится целиком (см. style.css: @media max-width:800px), карта там
+  // больше не единственный на экране элемент — под ней ещё сайдбар с
+  // панелями, так что зажимать её по window.innerHeight незачем: это только
+  // делало бы карту мельче, чем позволяет ширина экрана. Ограничиваем высоту
+  // с большим запасом — просто чтобы совсем узкие в высоту сканы (широкие
+  // панорамы) не растягивались до неадекватных размеров.
+  const availH = mobile
+    ? Math.max(320, window.innerHeight * 3)
+    : Math.max(240, window.innerHeight - 150); // 150 = топбар + вертикальные отступы + строка статуса
 
   // Разрешаем небольшой апскейл (до 1.4x), если скан меньше доступного места —
   // так карта не остаётся крошечной на большом экране.
@@ -1311,6 +1647,7 @@ function undoControlPoints() {
   recomputeModel();
   updateCalibPanel();
   render();
+  scheduleSaveState();
 }
 
 function redoControlPoints() {
@@ -1321,6 +1658,7 @@ function redoControlPoints() {
   recomputeModel();
   updateCalibPanel();
   render();
+  scheduleSaveState();
 }
 
 /** Есть ли уже опорная точка на этой точке трека (excludeIndex — позиция в
@@ -1411,6 +1749,7 @@ el.canvas.addEventListener("click", (e) => {
     recomputeModel();
     updateCalibPanel();
     render();
+    scheduleSaveState();
     showStatus("Опорная точка переставлена");
     return;
   }
@@ -1419,6 +1758,15 @@ el.canvas.addEventListener("click", (e) => {
     // фиксирует точку трека, за которой сейчас "следит" индикатор.
     if (state.hoverTrackIndex !== null) {
       selectTrackIndex(state.hoverTrackIndex);
+    } else if (state.model && state.trackStats) {
+      // На тач-устройствах mousemove (а значит и hoverTrackIndex) перед
+      // тапом не происходит вообще — наведения там не существует как
+      // явления. Без этого запасного пути обычный тап по карте на мобильном
+      // не делал бы ничего: ищем ближайшую точку трека прямо по месту тапа.
+      const rect = el.canvas.getBoundingClientRect();
+      const canvasPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const idx = findNearestTrackIndexByCanvasPoint(canvasPt);
+      if (idx !== null) selectTrackIndex(idx);
     }
     return;
   }
@@ -1462,6 +1810,7 @@ el.canvas.addEventListener("click", (e) => {
   recomputeModel();
   updateCalibPanel();
   render();
+  scheduleSaveState();
 });
 
 /** Двойной клик по точке трека на карте — быстрый способ сразу и выбрать
@@ -1529,6 +1878,7 @@ el.clearCalibButton.addEventListener("click", () => {
   state.repositionArmedIndex = null;
   updateCalibPanel();
   render();
+  scheduleSaveState();
 });
 
 /** Опорные точки всегда идут по возрастанию времени/индекса трека — и для
@@ -1548,6 +1898,7 @@ function removeControlPoint(index) {
   recomputeModel();
   updateCalibPanel();
   render();
+  scheduleSaveState();
 }
 
 /** Изменение времени уже добавленной опорной точки — двигает её вдоль трека,
@@ -1580,6 +1931,7 @@ function retimeControlPoint(index, raw) {
   recomputeModel();
   updateCalibPanel();
   render();
+  scheduleSaveState();
 }
 
 // ---------- Оформление трека: цвета, прозрачность, толщина ----------
@@ -1595,6 +1947,7 @@ paceColorInputs.forEach((inputEl, i) => {
     state.paceColorStops[i] = inputEl.value;
     updateLegendGradient();
     render();
+    scheduleSaveState();
   });
 });
 updateLegendGradient();
@@ -1606,6 +1959,7 @@ el.resetColorsButton.addEventListener("click", () => {
   });
   updateLegendGradient();
   render();
+  scheduleSaveState();
 });
 
 // ---------- Границы шкалы темпа (быстро/медленно) ----------
@@ -1757,6 +2111,7 @@ function setupPaceThumbDrag(thumbEl, isMinThumb) {
     }
     syncPaceBoundsUI();
     render();
+    scheduleSaveState();
   }
 
   thumbEl.addEventListener("pointerdown", (e) => {
@@ -1829,6 +2184,7 @@ function setPaceMinFromInput({ reportError = false } = {}) {
   state.paceMinSecPerKm = Math.min(sec, state.paceMaxSecPerKm - PACE_BOUNDS_MIN_GAP);
   syncPaceThumbsOnly();
   render();
+  scheduleSaveState();
 }
 
 function setPaceMaxFromInput({ reportError = false } = {}) {
@@ -1842,6 +2198,7 @@ function setPaceMaxFromInput({ reportError = false } = {}) {
   state.paceMaxSecPerKm = Math.max(sec, state.paceMinSecPerKm + PACE_BOUNDS_MIN_GAP);
   syncPaceThumbsOnly();
   render();
+  scheduleSaveState();
 }
 
 attachTimeInputMask(el.paceMinInput, paceMaskMaxAbsSeconds);
@@ -1871,18 +2228,21 @@ el.opacitySlider.addEventListener("input", () => {
   state.routeOpacity = 1 - Number(el.opacitySlider.value) / 100;
   el.opacityValue.textContent = `${el.opacitySlider.value}%`;
   render();
+  scheduleSaveState();
 });
 
 el.widthSlider.addEventListener("input", () => {
   state.routeWidth = Number(el.widthSlider.value);
   el.widthValue.textContent = `${state.routeWidth} px`;
   render();
+  scheduleSaveState();
 });
 
 el.outlineSlider.addEventListener("input", () => {
   state.routeOutlineWidth = Number(el.outlineSlider.value);
   el.outlineValue.textContent = `${state.routeOutlineWidth} px`;
   render();
+  scheduleSaveState();
 });
 
 el.opacitySlider.value = Math.round((1 - state.routeOpacity) * 100);
@@ -2036,6 +2396,7 @@ function applyTrimFromModal() {
   updateStatsPanel();
   updateCalibPanel(); // все времена (слайдер, список опорных точек) теперь отсчитываются от нового trimStart
   render();
+  scheduleSaveState();
   showStatus("Обрезка применена");
   closeTrimModal();
 }
@@ -2161,6 +2522,7 @@ function setZoom(z) {
   applyCanvasSize();
   syncZoomUI();
   render();
+  scheduleSaveState();
 }
 
 el.zoomSlider.addEventListener("input", () => {
@@ -2264,6 +2626,46 @@ el.canvas.addEventListener("mouseleave", () => {
     state.crosshairPos = null;
     drawCrosshairOverlay();
   }
+});
+
+// Тач-версия перекрестия выше — на мобильном mousemove не происходит вообще
+// (наведения как явления не существует), поэтому без этого обработчика
+// перекрестие в режиме armedForClick/repositionArmedIndex не появлялось бы,
+// пока пользователь не поднимет палец (клик и так сработает по touchend/
+// click напрямую от координат, но без визуальной подсказки, где именно
+// сейчас "прицел"). { passive: true } — не мешаем нативному скроллу/пану,
+// если палец в итоге потащит карту, а не тапнет по месту.
+el.canvas.addEventListener(
+  "touchstart",
+  (e) => {
+    if (!state.mapImage) return;
+    if (!(state.armedForClick || state.repositionArmedIndex !== null)) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    const rect = el.canvas.getBoundingClientRect();
+    state.crosshairPos = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+    drawCrosshairOverlay();
+  },
+  { passive: true }
+);
+
+el.canvas.addEventListener(
+  "touchmove",
+  (e) => {
+    if (!state.mapImage) return;
+    if (!(state.armedForClick || state.repositionArmedIndex !== null)) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    const rect = el.canvas.getBoundingClientRect();
+    state.crosshairPos = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+    drawCrosshairOverlay();
+  },
+  { passive: true }
+);
+
+el.canvas.addEventListener("touchend", () => {
+  state.crosshairPos = null;
+  drawCrosshairOverlay();
 });
 
 // ---------- Панорамирование карты зажатой мышью ----------
@@ -2441,3 +2843,107 @@ el.exportButton.addEventListener("click", () => {
   link.click();
   render();
 });
+
+// ---------- Полная очистка (карта + трек) ----------
+//
+// Сбрасывает всё состояние приложения к исходному ("пустой" экран
+// дропзоны) и стирает сохранённые данные (localStorage + Blob карты в
+// IndexedDB) — иначе при следующей перезагрузке страницы старая карта/трек
+// восстановились бы снова через restoreStateFromStorage(). Перед сбросом
+// обязательно переспрашивает — действие необратимо.
+
+function clearAllData() {
+  const confirmed = window.confirm("Очистить карту и трек? Это действие нельзя отменить.");
+  if (!confirmed) return;
+
+  // Сброс состояния к тем же значениям, что заданы в исходном объявлении state.
+  state.mapImage = null;
+  state.fitScale = 1;
+  state.zoomLevel = 1;
+  state.canvasScale = 1;
+  state.displayW = 0;
+  state.displayH = 0;
+  state.trackRaw = null;
+  state.trackStats = null;
+  state.projection = null;
+  state.controlPoints = [];
+  resetControlPointHistory();
+  state.model = null;
+  state.armedForClick = false;
+  state.repositionArmedIndex = null;
+  state.crosshairPos = null;
+  state.selectedTrackIndex = 0;
+  state.hoverTrackIndex = null;
+  state.currentIndicatorVisible = true;
+  state.pulseAnimation = null;
+  state.paceColorStops = [...DEFAULT_PACE_COLOR_STOPS];
+  state.paceMinSecPerKm = null;
+  state.paceMaxSecPerKm = null;
+  state.paceBoundsMin = 60;
+  state.paceBoundsMax = 900;
+  state.routeOpacity = 0.7;
+  state.routeWidth = 4;
+  state.routeOutlineWidth = 0.5;
+  state.trimStart = 0;
+  state.trimEnd = 0;
+  state.trimStartDraft = 0;
+  state.trimEndDraft = 0;
+  state.mapFileName = null;
+  state.trackFileName = null;
+
+  // Возврат UI к начальному экрану (дропзона).
+  el.layoutMain.classList.add("no-map");
+  document.body.classList.add("no-map");
+  el.emptyState.classList.remove("hidden");
+  el.zoomPanel.classList.add("hidden");
+  closeTrimModal();
+
+  // Очистка канвасов (карта + перекрестие) — по всему backing store.
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
+  ctx.restore();
+  clearCrosshairOverlay();
+
+  // Возврат полей стиля линии/зума к дефолтным значениям.
+  paceColorInputs.forEach((inputEl, i) => {
+    inputEl.value = state.paceColorStops[i];
+  });
+  updateLegendGradient();
+  el.opacitySlider.value = Math.round((1 - state.routeOpacity) * 100);
+  el.opacityValue.textContent = `${el.opacitySlider.value}%`;
+  el.widthSlider.value = state.routeWidth;
+  el.widthValue.textContent = `${state.routeWidth} px`;
+  el.outlineSlider.value = state.routeOutlineWidth;
+  el.outlineValue.textContent = `${state.routeOutlineWidth} px`;
+  syncZoomUI();
+
+  // Панели, зависящие от трека/карты, прячутся штатными функциями — без
+  // дублирования их внутренней логики скрытия здесь.
+  updateStatsPanel();
+  updateCalibPanel();
+  updateTrackDependentPanelsVisibility();
+
+  // Сброс полей выбора файлов — позволяет заново выбрать те же файлы.
+  el.mapInput.value = "";
+  el.trackInput.value = "";
+
+  showStatus("Карта и трек очищены");
+
+  // Сброс сохранённого состояния (localStorage + IndexedDB) — иначе оно
+  // восстановилось бы обратно при следующей перезагрузке страницы.
+  if (saveStateTimer) {
+    clearTimeout(saveStateTimer);
+    saveStateTimer = null;
+  }
+  clearSavedState();
+}
+
+el.clearAllButton.addEventListener("click", clearAllData);
+
+// ---------- Восстановление сохранённого состояния при старте ----------
+//
+// Вызывается в самом конце файла — все элементы UI, обработчики и функции
+// (setupPaceSliders, syncPaceBoundsUI, updateCalibPanel и т.п.) к этому
+// моменту уже объявлены и готовы к использованию.
+restoreStateFromStorage();
