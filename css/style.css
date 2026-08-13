@@ -851,12 +851,44 @@ canvas {
   }
 
   .topbar {
-    flex-wrap: wrap;
-    row-gap: 8px;
     padding: 10px 12px;
   }
-  .topbar-actions { flex-wrap: wrap; gap: 8px; }
-  .file-btn { font-size: 11.5px; padding: 9px 12px; } /* чуть выше по вертикали — под палец, а не под курсор мыши */
+  /* На мобильном экран узкий, а важнее всего — быстрый доступ к кнопкам
+     действий (карта/трек/сохранить/очистить), а не логотип с названием:
+     он просто занимает место, которое иначе ушло бы под кнопки. Без него
+     не нужно и переносить шапку на две строки — весь топбар остаётся
+     одной строкой. */
+  .brand {
+    display: none;
+  }
+  .topbar-right {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .topbar-actions {
+    /* Раньше здесь был flex-wrap — при нехватке места кнопки переносились
+       на вторую строку неровно (то 3+1, то 2+2, разной ширины на разных
+       экранах — выглядело "криво"). Теперь ряд всегда ОДИН: если кнопки
+       всё равно не помещаются на совсем узких экранах, вместо переноса
+       строк весь ряд горизонтально прокручивается целиком — так строй
+       кнопок не ломается ни при какой ширине экрана. */
+    flex: 1 1 auto;
+    min-width: 0; /* без этого overflow-x ниже не сработает — flex-элемент не сжался бы меньше суммарной ширины кнопок */
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 6px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .topbar-actions > * {
+    flex-shrink: 0; /* кнопки не сжимаются/не переносят текст при нехватке места — вместо этого включается скролл у .topbar-actions */
+  }
+  /* Уточнение формата файла в скобках — расход места, без которого можно
+     обойтись на узком экране (сам файл всё равно принимается по accept у
+     input, а не по подписи). См. index.html: .file-btn-detail. */
+  .file-btn-detail {
+    display: none;
+  }
+  .file-btn { font-size: 11.5px; padding: 9px 10px; } /* чуть выше по вертикали — под палец, а не под курсор мыши */
 
   /* Текстовые поля ввода — минимум 16px, иначе Mobile Safari интерпретирует
      фокус на поле с меньшим шрифтом как "пользователю плохо видно" и сам
@@ -887,7 +919,7 @@ canvas {
   .dual-range { height: 30px; margin: 10px 10px 0 4px; }
   .dual-range-thumb { width: 26px; height: 26px; margin-left: -13px; }
 
-  .icon-btn-square, .theme-toggle { width: 40px; height: 40px; }
+  .icon-btn-square, .theme-toggle { width: 40px; height: 40px; flex-shrink: 0; }
 
   .modal-box { padding: 18px; }
 }
