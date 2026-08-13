@@ -22,6 +22,7 @@ const state = {
   model: null, // buildSegmentedModel(controlPoints): { segments }
   armedForClick: false, // ждём клика по карте для новой опорной точки
   repositionArmedIndex: null, // индекс опорной точки, для которой ждём клика по карте, чтобы переставить её место
+  crosshairPos: null, // {x,y} в canvas-координатах — позиция курсора, пока ждём клика по карте (armedForClick/repositionArmedIndex); рисуется как пунктирное перекрестие на весь канвас
   selectedTrackIndex: 0,
   hoverTrackIndex: null, // точка трека под курсором мыши (предпросмотр перед фиксацией кликом)
   currentIndicatorVisible: true, // видимость маркера текущей точки на треке (см. drawCurrentIndicator); прячется сразу после фиксации опорной точки, пока пользователь не выберет новую точку
@@ -29,8 +30,11 @@ const state = {
   paceColorStops: [...DEFAULT_PACE_COLOR_STOPS], // зелёный → жёлтый → оранжевый → красный, плавный 4-цветный градиент по умолчанию
   paceMinSecPerKm: null, // темп левой границы шкалы (самый быстрый/первый цвет) — авто при загрузке трека, дальше можно двигать вручную (ползунок/поле ввода)
   paceMaxSecPerKm: null, // темп правой границы шкалы (самый медленный/последний цвет)
+  paceBoundsMin: 60, // крайние значения (секунд/км), которых достигает дорожка dual-range слайдера — раздвигаются при ручном вводе значения за пределами (см. extendPaceSliderBounds)
+  paceBoundsMax: 900,
   routeOpacity: 0.7,
   routeWidth: 4,
+  routeOutlineWidth: 0.5, // px (при zoomLevel=1) — толщина чёрной обводки по обе стороны цветной линии, 0 = обводки нет
   trimStart: 0, // индекс точки трека — начало ПРИМЕНЁННОЙ обрезки (используется в render/статистике/точке отсчёта времени)
   trimEnd: 0, // индекс точки трека — конец ПРИМЕНЁННОЙ обрезки
   trimStartDraft: 0, // черновые значения слайдеров/полей модалки обрезки — не влияют ни на что, пока не нажата "Применить"
@@ -62,22 +66,25 @@ const el = {
   clearCalibButton: document.getElementById("clearCalibButton"),
   statusMsg: document.getElementById("statusMsg"),
   legendPanel: document.getElementById("legendPanel"),
+  stylePanel: document.getElementById("stylePanel"),
   legendGradient: document.getElementById("legendGradient"),
   colorStop0: document.getElementById("colorStop0"),
   colorStop1: document.getElementById("colorStop1"),
   colorStop2: document.getElementById("colorStop2"),
   colorStop3: document.getElementById("colorStop3"),
   resetColorsButton: document.getElementById("resetColorsButton"),
-  paceMinSlider: document.getElementById("paceMinSlider"),
-  paceMinValue: document.getElementById("paceMinValue"),
+  paceDualRange: document.getElementById("paceDualRange"),
+  paceDualRangeFill: document.getElementById("paceDualRangeFill"),
+  paceMinThumb: document.getElementById("paceMinThumb"),
+  paceMaxThumb: document.getElementById("paceMaxThumb"),
   paceMinInput: document.getElementById("paceMinInput"),
-  paceMaxSlider: document.getElementById("paceMaxSlider"),
-  paceMaxValue: document.getElementById("paceMaxValue"),
   paceMaxInput: document.getElementById("paceMaxInput"),
   opacitySlider: document.getElementById("opacitySlider"),
   opacityValue: document.getElementById("opacityValue"),
   widthSlider: document.getElementById("widthSlider"),
   widthValue: document.getElementById("widthValue"),
+  outlineSlider: document.getElementById("outlineSlider"),
+  outlineValue: document.getElementById("outlineValue"),
   zoomPanel: document.getElementById("zoomPanel"),
   zoomSlider: document.getElementById("zoomSlider"),
   zoomValue: document.getElementById("zoomValue"),
@@ -94,8 +101,10 @@ const el = {
 
 
 el.themeToggleButton = document.getElementById("themeToggleButton");
+el.crosshairCanvas = document.getElementById("crosshairCanvas");
 
 const ctx = el.canvas.getContext("2d");
+const crosshairCtx = el.crosshairCanvas.getContext("2d");
 
 // ---------- Тема (светлая/тёмная) ----------
 //
@@ -197,7 +206,7 @@ async function handleMapFile(file) {
     el.emptyState.classList.add("hidden");
     el.zoomPanel.classList.remove("hidden");
     syncZoomUI();
-    updateLegendPanelVisibility();
+    updateTrackDependentPanelsVisibility();
     showStatus(`Карта загружена: ${file.name} (${img.naturalWidth}×${img.naturalHeight})`);
   } catch (err) {
     showStatus("Не удалось загрузить изображение карты: " + err.message, true);
@@ -221,7 +230,7 @@ async function handleTrackFile(file) {
     setupPaceSliders(); // границы шкалы темпа по умолчанию — авто по данным трека, дальше можно двигать вручную
     updateStatsPanel();
     updateCalibPanel();
-    updateLegendPanelVisibility();
+    updateTrackDependentPanelsVisibility();
     render();
     showStatus(`Трек загружен: ${file.name} (${points.length} точек)`);
     openTrimModal(); // сразу спрашиваем про обрезку, пока пользователь ещё держит контекст загрузки в голове
@@ -361,6 +370,14 @@ function applyCanvasSize() {
   el.canvas.height = Math.round(state.displayH * dpr);
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Оверлей перекрестия — тот же размер/dpr, что и основной канвас, чтобы
+  // координаты курсора совпадали 1-в-1 (см. drawCrosshairOverlay).
+  el.crosshairCanvas.style.width = state.displayW + "px";
+  el.crosshairCanvas.style.height = state.displayH + "px";
+  el.crosshairCanvas.width = Math.round(state.displayW * dpr);
+  el.crosshairCanvas.height = Math.round(state.displayH * dpr);
+  crosshairCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
 function fitCanvasToContainer() {
@@ -396,6 +413,7 @@ function render({ includeMarkers = true } = {}) {
     drawCurrentIndicator();
     drawArmPulse();
   }
+  drawCrosshairOverlay(); // отдельный канвас — в экспорт (toDataURL основного canvas) не попадает
 }
 
 function imgToCanvas(pt) {
@@ -490,8 +508,12 @@ function drawRoute() {
   // Толщина линии задаётся в "метрах карты" (пикселях при zoomLevel=1) и
   // масштабируется вместе с зумом — иначе при уменьшении масштаба карты
   // линия остаётся того же экранного размера, а сама карта становится
-  // меньше, и трек визуально "толстеет" относительно неё.
+  // меньше, и трек визуально "толстеет" относительно неё. Обводка
+  // масштабируется точно так же, чтобы её толщина в пикселях экрана не
+  // "плыла" относительно самой линии при зуме.
   const scaledRouteWidth = state.routeWidth * state.zoomLevel;
+  const scaledOutlineWidth = state.routeOutlineWidth * state.zoomLevel;
+  const scaledShapeWidth = scaledRouteWidth + scaledOutlineWidth * 2;
 
   const from = Math.max(1, state.trimStart + 1);
   const to = Math.min(projected.length - 1, state.trimEnd);
@@ -501,10 +523,18 @@ function drawRoute() {
   for (let pass = 0; pass < ROUTE_SMOOTH_PASSES; pass++) smoothed = smoothPolylinePass(smoothed);
 
   // ---- Шаг 1: форма — один сплошной путь через все точки диапазона ----
-  routeBufferCtx.lineWidth = scaledRouteWidth;
+  // Ширина этого прохода — scaledShapeWidth (толщина линии + обводка с
+  // обеих сторон), а не просто scaledRouteWidth: раскраска на шаге 2 рисует
+  // цветные сегменты более узким штрихом (scaledRouteWidth) поверх этой
+  // формы в режиме "source-atop", поэтому она физически не достаёт до
+  // внешнего кольца — оно остаётся чёрным (тем же цветом, что и вся форма
+  // здесь), давая ровную чёрную обводку заданной толщины. При
+  // routeOutlineWidth=0 scaledShapeWidth совпадает со scaledRouteWidth, и
+  // обводки не видно вовсе — как и раньше.
+  routeBufferCtx.lineWidth = scaledShapeWidth;
   routeBufferCtx.lineJoin = "round";
   routeBufferCtx.lineCap = "round"; // скруглённые самые первый/последний концы всего трека — единственные настоящие "концы" во всей отрисовке
-  routeBufferCtx.strokeStyle = "#000"; // цвет неважен — этот проход задаёт только форму (альфа-маску) для шага 2
+  routeBufferCtx.strokeStyle = "#000"; // именно чёрный — этот проход одновременно и маска для шага 2, и видимый цвет обводки там, куда шаг 2 не дотягивается
   routeBufferCtx.beginPath();
   routeBufferCtx.moveTo(smoothed[from - 1].x, smoothed[from - 1].y);
   for (let i = from; i <= to; i++) routeBufferCtx.lineTo(smoothed[i].x, smoothed[i].y);
@@ -516,6 +546,7 @@ function drawRoute() {
   // из-за погрешности GPS.
   routeBufferCtx.save();
   routeBufferCtx.globalCompositeOperation = "source-atop";
+  routeBufferCtx.lineWidth = scaledRouteWidth; // уже (а не scaledShapeWidth из шага 1) — иначе цветной штрих полностью перекрывает чёрную подложку, и обводки не видно вовсе, только более толстая линия
   routeBufferCtx.lineJoin = "round";
   routeBufferCtx.lineCap = "round";
   for (let i = from; i <= to; i++) {
@@ -550,8 +581,15 @@ function controlPointLabel(i, total) {
 
 function drawControlPoints() {
   const total = state.controlPoints.length;
-  const r = 6;
-  const colorWidth = 1.25;
+  // Толщина линии трека масштабируется вместе с зумом (см. drawRoute:
+  // scaledRouteWidth = routeWidth * zoomLevel) — кружки и подписи опорных
+  // точек раньше рисовались фиксированного размера в canvas-пикселях, и при
+  // уменьшении масштаба карты (zoomLevel < 1) линия трека становилась
+  // тоньше, а кружки оставались прежними — визуально несоразмерно большими
+  // относительно линии. Масштабируем их точно так же, как и линию.
+  const z = state.zoomLevel;
+  const r = 6 * z;
+  const colorWidth = 1.2 * z;
   state.controlPoints.forEach((cp, i) => {
     const pt = imgToCanvas(cp.target);
 
@@ -561,7 +599,7 @@ function drawControlPoints() {
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
     ctx.strokeStyle = MARKER_OUTLINE_COLOR;
-    ctx.lineWidth = colorWidth + MARKER_OUTLINE_WIDTH * 2;
+    ctx.lineWidth = colorWidth + MARKER_OUTLINE_WIDTH * 2 * z;
     ctx.stroke();
 
     ctx.beginPath();
@@ -571,14 +609,16 @@ function drawControlPoints() {
     ctx.stroke();
 
     const label = controlPointLabel(i, total);
-    ctx.font = "bold 16px system-ui, sans-serif";
+    const fontPx = Math.max(10, Math.round(14 * z));
+    const labelOffset = 14 * z;
+    ctx.font = `bold ${fontPx}px system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.lineWidth = MARKER_OUTLINE_WIDTH * 4.5;
+    ctx.lineWidth = MARKER_OUTLINE_WIDTH * 3.5 * z;
     ctx.strokeStyle = MARKER_OUTLINE_COLOR;
-    ctx.strokeText(label, pt.x, pt.y - 16);
+    ctx.strokeText(label, pt.x, pt.y - labelOffset);
     ctx.fillStyle = CONTROL_POINT_COLOR;
-    ctx.fillText(label, pt.x, pt.y - 16);
+    ctx.fillText(label, pt.x, pt.y - labelOffset);
   });
 }
 
@@ -621,6 +661,62 @@ function drawCurrentIndicator() {
   ctx.strokeText(label, pt.x, pt.y - 16);
   ctx.fillStyle = CURRENT_POINT_COLOR;
   ctx.fillText(label, pt.x, pt.y - 16);
+}
+
+/** Пунктирное перекрестие на всю ширину/высоту канваса в точке курсора —
+ *  видно, пока ждём клика по карте, чтобы зафиксировать место новой опорной
+ *  точки (armedForClick) или переставить существующую (repositionArmedIndex).
+ *  Белые штрихи с чёрной обводкой, концы штрихов скруглены (lineCap:
+ *  "round") — рисуются в два прохода одного и того же пунктирного рисунка
+ *  (без сдвига фазы): сначала более толстый чёрный штрих, затем поверх него
+ *  более тонкий белый — снизу остаётся только тонкая скруглённая чёрная
+ *  кайма по краям, как и у прочих маркеров на карте.
+ *
+ *  Рисуется на ОТДЕЛЬНОМ канвасе (el.crosshairCanvas), а не поверх основной
+ *  карты внутри render(): render() каждый раз пересчитывает и перерисовывает
+ *  весь трек (drawRoute — самая тяжёлая часть кадра), и если гонять его на
+ *  каждое mousemove, перекрестие визуально "не успевает" за курсором и
+ *  заметно отстаёт. Отдельный лёгкий канвас поверх основного (см. style.css:
+ *  .crosshair-canvas) обновляется независимо и мгновенно, не трогая карту/
+ *  трек под ним. */
+function clearCrosshairOverlay() {
+  crosshairCtx.save();
+  crosshairCtx.setTransform(1, 0, 0, 1, 0, 0);
+  crosshairCtx.clearRect(0, 0, el.crosshairCanvas.width, el.crosshairCanvas.height);
+  crosshairCtx.restore();
+}
+
+function drawCrosshairOverlay() {
+  clearCrosshairOverlay();
+  if (!state.crosshairPos) return;
+  if (!state.armedForClick && state.repositionArmedIndex === null) return;
+  const { x, y } = state.crosshairPos;
+  const w = state.displayW;
+  const h = state.displayH;
+
+  crosshairCtx.save();
+  crosshairCtx.setLineDash([6, 5]);
+  crosshairCtx.lineCap = "round";
+
+  crosshairCtx.lineWidth = 3;
+  crosshairCtx.strokeStyle = "rgba(0, 0, 0, 0.85)";
+  crosshairCtx.beginPath();
+  crosshairCtx.moveTo(x + 0.5, 0);
+  crosshairCtx.lineTo(x + 0.5, h);
+  crosshairCtx.moveTo(0, y + 0.5);
+  crosshairCtx.lineTo(w, y + 0.5);
+  crosshairCtx.stroke();
+
+  crosshairCtx.lineWidth = 1.4;
+  crosshairCtx.strokeStyle = "rgba(255, 255, 255, 0.95)";
+  crosshairCtx.beginPath();
+  crosshairCtx.moveTo(x + 0.5, 0);
+  crosshairCtx.lineTo(x + 0.5, h);
+  crosshairCtx.moveTo(0, y + 0.5);
+  crosshairCtx.lineTo(w, y + 0.5);
+  crosshairCtx.stroke();
+
+  crosshairCtx.restore();
 }
 
 const ARM_PULSE_COLOR = CURRENT_POINT_COLOR; // красный — тот же, что у индикатора текущей точки
@@ -1243,9 +1339,11 @@ el.armButton.addEventListener("click", () => {
     // Повторный клик по этой же кнопке во время ожидания клика по карте —
     // отменяет добавление опорной точки.
     state.armedForClick = false;
+    state.crosshairPos = null;
     el.armButton.textContent = "Добавить опорную точку";
     el.armButton.classList.remove("armed");
     updateCanvasCursor();
+    render();
     return;
   }
   if (!state.mapImage) {
@@ -1278,6 +1376,7 @@ function toggleRepositionArm(i) {
   }
   if (state.repositionArmedIndex === i) {
     state.repositionArmedIndex = null;
+    state.crosshairPos = null;
   } else {
     // Отменяем режим добавления новой точки, если он был активен — как и
     // выше, ждать клика одновременно для двух разных целей нельзя.
@@ -1290,6 +1389,7 @@ function toggleRepositionArm(i) {
   }
   updateCanvasCursor();
   renderControlPointList();
+  render();
 }
 
 el.canvas.addEventListener("click", (e) => {
@@ -1306,6 +1406,7 @@ el.canvas.addEventListener("click", (e) => {
       cp.target = canvasToImg(canvasPt);
     }
     state.repositionArmedIndex = null;
+    state.crosshairPos = null;
     updateCanvasCursor();
     recomputeModel();
     updateCalibPanel();
@@ -1332,9 +1433,11 @@ el.canvas.addEventListener("click", (e) => {
   if (hasControlPointAtTrackIndex(state.selectedTrackIndex)) {
     showStatus("На этой точке трека уже есть опорная точка — выбери другое время", true);
     state.armedForClick = false;
+    state.crosshairPos = null;
     el.armButton.textContent = "Добавить опорную точку";
     el.armButton.classList.remove("armed");
     updateCanvasCursor();
+    drawCrosshairOverlay();
     return;
   }
 
@@ -1351,6 +1454,7 @@ el.canvas.addEventListener("click", (e) => {
   state.currentIndicatorVisible = false; // опорная точка зафиксирована — маркер текущей точки на треке больше не нужен
 
   state.armedForClick = false;
+  state.crosshairPos = null;
   el.armButton.textContent = "Добавить опорную точку";
   el.armButton.classList.remove("armed");
   updateCanvasCursor();
@@ -1535,34 +1639,27 @@ function paceSliderRange() {
   };
 }
 
-/** Настраивает диапазон ползунков под текущий трек и выставляет исходные
- *  значения границ шкалы — по умолчанию тот же авто-диапазон, что раньше
- *  использовался неявно (минимальный темп и 95й перцентиль). Вызывается
- *  один раз при загрузке нового трека (см. handleTrackFile) — при
- *  повторной обрезке уже выбранные пользователем границы не сбрасываются. */
+/** Настраивает диапазон dual-range слайдера под текущий трек и выставляет
+ *  исходные значения границ шкалы — по умолчанию тот же авто-диапазон, что
+ *  раньше использовался неявно (минимальный темп и 95й перцентиль).
+ *  Вызывается один раз при загрузке нового трека (см. handleTrackFile) —
+ *  при повторной обрезке уже выбранные пользователем границы не сбрасываются. */
 function setupPaceSliders() {
   const range = paceSliderRange();
-  [el.paceMinSlider, el.paceMaxSlider].forEach((slider) => {
-    slider.min = range.min;
-    slider.max = range.max;
-    slider.step = 5;
-  });
+  state.paceBoundsMin = range.min;
+  state.paceBoundsMax = range.max;
   state.paceMinSecPerKm = state.trackStats.minPaceSecPerKm ?? range.min;
   state.paceMaxSecPerKm = state.trackStats.maxPaceSecPerKm ?? range.max;
   syncPaceBoundsUI();
 }
 
-/** Раздвигает атрибуты min/max самих ползунков, если пользователь вручную
- *  ввёл через текстовое поле значение за пределами текущего диапазона —
- *  иначе бегунок визуально "прилипал" бы к краю шкалы, хотя
+/** Раздвигает крайние значения дорожки dual-range слайдера, если пользователь
+ *  вручную ввёл через текстовое поле значение за пределами текущего
+ *  диапазона — иначе бегунок визуально "прилипал" бы к краю шкалы, хотя
  *  state.pace*SecPerKm уже содержит другое, более крайнее значение. */
 function extendPaceSliderBounds(sec) {
-  const lo = Math.min(Number(el.paceMinSlider.min), sec);
-  const hi = Math.max(Number(el.paceMaxSlider.max), sec);
-  el.paceMinSlider.min = lo;
-  el.paceMaxSlider.min = lo;
-  el.paceMinSlider.max = hi;
-  el.paceMaxSlider.max = hi;
+  state.paceBoundsMin = Math.min(state.paceBoundsMin, sec);
+  state.paceBoundsMax = Math.max(state.paceBoundsMax, sec);
 }
 
 /** секунды/км -> "м:сс", без суффикса " /км" (тот, что в formatPace) —
@@ -1581,15 +1678,48 @@ function paceToMSS(sec) {
  *  обрезки. Именно от неё зависит, после скольких цифр минут маска сама
  *  проставляет ":" и переходит к секундам. */
 function paceMaskMaxAbsSeconds() {
-  return Number(el.paceMaxSlider.max) || 900;
+  return state.paceBoundsMax || 900;
 }
 
+/** Позиция бегунка в процентах [0,100] вдоль дорожки dual-range слайдера
+ *  для значения sec секунд/км, с учётом текущих крайних значений дорожки
+ *  (state.paceBoundsMin/paceBoundsMax). */
+function paceValueToPercent(sec) {
+  const span = state.paceBoundsMax - state.paceBoundsMin;
+  if (span <= 0) return 0;
+  return Math.min(100, Math.max(0, ((sec - state.paceBoundsMin) / span) * 100));
+}
+
+/** Обратное к paceValueToPercent — процент позиции вдоль дорожки -> секунды/км. */
+function pacePercentToValue(pct) {
+  const span = state.paceBoundsMax - state.paceBoundsMin;
+  return state.paceBoundsMin + (Math.min(100, Math.max(0, pct)) / 100) * span;
+}
+
+/** Обновляет только позиции бегунков/заливку/подписи-значения — НЕ трогает
+ *  содержимое текстовых полей ввода. Используется при ручном наборе текста
+ *  (см. setPaceMinFromInput/setPaceMaxFromInput), где перезапись value
+ *  сбивала бы то, что пользователь ещё печатает (та же логика, что и в
+ *  полях модалки обрезки — setTrimStartDraftFromInput и т.п.). */
+function syncPaceThumbsOnly() {
+  if (state.paceMinSecPerKm === null || state.paceMaxSecPerKm === null) return;
+  const minPct = paceValueToPercent(state.paceMinSecPerKm);
+  const maxPct = paceValueToPercent(state.paceMaxSecPerKm);
+  el.paceMinThumb.style.left = `${minPct}%`;
+  el.paceMaxThumb.style.left = `${maxPct}%`;
+  el.paceMinThumb.setAttribute("aria-valuenow", String(Math.round(minPct)));
+  el.paceMaxThumb.setAttribute("aria-valuenow", String(Math.round(maxPct)));
+  el.paceDualRangeFill.style.left = `${minPct}%`;
+  el.paceDualRangeFill.style.width = `${Math.max(0, maxPct - minPct)}%`;
+}
+
+/** Полная синхронизация — бегунки (см. syncPaceThumbsOnly) плюс содержимое
+ *  текстовых полей и плейсхолдеры. Используется везде, кроме обработчика
+ *  события "input" на самих текстовых полях (там нужен вариант без
+ *  перезаписи value — см. syncPaceThumbsOnly). */
 function syncPaceBoundsUI() {
   if (state.paceMinSecPerKm === null || state.paceMaxSecPerKm === null) return;
-  el.paceMinSlider.value = Math.round(state.paceMinSecPerKm);
-  el.paceMaxSlider.value = Math.round(state.paceMaxSecPerKm);
-  el.paceMinValue.textContent = formatPace(state.paceMinSecPerKm);
-  el.paceMaxValue.textContent = formatPace(state.paceMaxSecPerKm);
+  syncPaceThumbsOnly();
   const placeholder = zeroTimeMaskLabel(paceMaskMaxAbsSeconds());
   el.paceMinInput.placeholder = placeholder;
   el.paceMaxInput.placeholder = placeholder;
@@ -1599,20 +1729,87 @@ function syncPaceBoundsUI() {
 
 const PACE_BOUNDS_MIN_GAP = 5; // секунд/км — границы не могут схлопнуться в одну точку
 
-el.paceMinSlider.addEventListener("input", () => {
-  if (state.paceMaxSecPerKm === null) return;
-  const v = Math.min(Number(el.paceMinSlider.value), state.paceMaxSecPerKm - PACE_BOUNDS_MIN_GAP);
-  state.paceMinSecPerKm = Math.max(Number(el.paceMinSlider.min), v);
-  syncPaceBoundsUI();
-  render();
-});
+/** Перетаскивание бегунков dual-range слайдера через Pointer Events — один
+ *  и тот же обработчик обслуживает оба бегунка (thumbEl, isMinThumb):
+ *  позиция курсора переводится в проценты вдоль дорожки, затем в
+ *  секунды/км через pacePercentToValue, и присваивается state.paceMinSecPerKm
+ *  или state.paceMaxSecPerKm с ограничением PACE_BOUNDS_MIN_GAP — так же,
+ *  как раньше делали два независимых <input type="range">. */
+function setupPaceThumbDrag(thumbEl, isMinThumb) {
+  function valueFromClientX(clientX) {
+    const rect = el.paceDualRange.getBoundingClientRect();
+    const pct = rect.width > 0 ? ((clientX - rect.left) / rect.width) * 100 : 0;
+    return pacePercentToValue(pct);
+  }
 
-el.paceMaxSlider.addEventListener("input", () => {
-  if (state.paceMinSecPerKm === null) return;
-  const v = Math.max(Number(el.paceMaxSlider.value), state.paceMinSecPerKm + PACE_BOUNDS_MIN_GAP);
-  state.paceMaxSecPerKm = Math.min(Number(el.paceMaxSlider.max), v);
-  syncPaceBoundsUI();
-  render();
+  function applyValue(sec) {
+    if (state.paceMinSecPerKm === null || state.paceMaxSecPerKm === null) return;
+    if (isMinThumb) {
+      state.paceMinSecPerKm = Math.max(
+        state.paceBoundsMin,
+        Math.min(sec, state.paceMaxSecPerKm - PACE_BOUNDS_MIN_GAP)
+      );
+    } else {
+      state.paceMaxSecPerKm = Math.min(
+        state.paceBoundsMax,
+        Math.max(sec, state.paceMinSecPerKm + PACE_BOUNDS_MIN_GAP)
+      );
+    }
+    syncPaceBoundsUI();
+    render();
+  }
+
+  thumbEl.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    thumbEl.setPointerCapture(e.pointerId);
+    thumbEl.focus();
+    applyValue(valueFromClientX(e.clientX));
+
+    function onMove(ev) {
+      applyValue(valueFromClientX(ev.clientX));
+    }
+    function onUp() {
+      thumbEl.removeEventListener("pointermove", onMove);
+      thumbEl.removeEventListener("pointerup", onUp);
+      thumbEl.removeEventListener("pointercancel", onUp);
+    }
+    thumbEl.addEventListener("pointermove", onMove);
+    thumbEl.addEventListener("pointerup", onUp);
+    thumbEl.addEventListener("pointercancel", onUp);
+  });
+
+  // Стрелки клавиатуры — доступность для тех, кто не пользуется мышью/тачем.
+  thumbEl.addEventListener("keydown", (e) => {
+    if (state.paceMinSecPerKm === null || state.paceMaxSecPerKm === null) return;
+    const step = e.shiftKey ? 30 : 5;
+    const current = isMinThumb ? state.paceMinSecPerKm : state.paceMaxSecPerKm;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+      e.preventDefault();
+      applyValue(current - step);
+    } else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+      e.preventDefault();
+      applyValue(current + step);
+    }
+  });
+}
+
+setupPaceThumbDrag(el.paceMinThumb, true);
+setupPaceThumbDrag(el.paceMaxThumb, false);
+
+// Клик по самой дорожке (не по бегунку) — двигает ближайший к клику бегунок,
+// как в большинстве двухползунковых слайдеров.
+el.paceDualRange.addEventListener("pointerdown", (e) => {
+  if (e.target === el.paceMinThumb || e.target === el.paceMaxThumb) return;
+  if (state.paceMinSecPerKm === null || state.paceMaxSecPerKm === null) return;
+  const rect = el.paceDualRange.getBoundingClientRect();
+  const pct = rect.width > 0 ? ((e.clientX - rect.left) / rect.width) * 100 : 0;
+  const sec = pacePercentToValue(pct);
+  const distToMin = Math.abs(sec - state.paceMinSecPerKm);
+  const distToMax = Math.abs(sec - state.paceMaxSecPerKm);
+  const nearestThumb = distToMin <= distToMax ? el.paceMinThumb : el.paceMaxThumb;
+  nearestThumb.dispatchEvent(
+    new PointerEvent("pointerdown", { clientX: e.clientX, clientY: e.clientY, pointerId: e.pointerId, bubbles: true })
+  );
 });
 
 /** Ручной ввод левой границы (черновой, при каждой введённой цифре) — как и
@@ -1630,8 +1827,7 @@ function setPaceMinFromInput({ reportError = false } = {}) {
   }
   extendPaceSliderBounds(sec);
   state.paceMinSecPerKm = Math.min(sec, state.paceMaxSecPerKm - PACE_BOUNDS_MIN_GAP);
-  el.paceMinSlider.value = Math.round(state.paceMinSecPerKm);
-  el.paceMinValue.textContent = formatPace(state.paceMinSecPerKm);
+  syncPaceThumbsOnly();
   render();
 }
 
@@ -1644,8 +1840,7 @@ function setPaceMaxFromInput({ reportError = false } = {}) {
   }
   extendPaceSliderBounds(sec);
   state.paceMaxSecPerKm = Math.max(sec, state.paceMinSecPerKm + PACE_BOUNDS_MIN_GAP);
-  el.paceMaxSlider.value = Math.round(state.paceMaxSecPerKm);
-  el.paceMaxValue.textContent = formatPace(state.paceMaxSecPerKm);
+  syncPaceThumbsOnly();
   render();
 }
 
@@ -1684,10 +1879,18 @@ el.widthSlider.addEventListener("input", () => {
   render();
 });
 
+el.outlineSlider.addEventListener("input", () => {
+  state.routeOutlineWidth = Number(el.outlineSlider.value);
+  el.outlineValue.textContent = `${state.routeOutlineWidth} px`;
+  render();
+});
+
 el.opacitySlider.value = Math.round((1 - state.routeOpacity) * 100);
 el.opacityValue.textContent = `${el.opacitySlider.value}%`;
 el.widthSlider.value = state.routeWidth;
 el.widthValue.textContent = `${state.routeWidth} px`;
+el.outlineSlider.value = state.routeOutlineWidth;
+el.outlineValue.textContent = `${state.routeOutlineWidth} px`;
 
 // ---------- Обрезка трека (начало/конец) ----------
 //
@@ -2034,6 +2237,35 @@ el.canvas.addEventListener("mouseleave", () => {
   }
 });
 
+// Перекрестие-подсказка (см. drawCrosshairOverlay) — активно только пока
+// ждём клика по карте для новой/переставляемой опорной точки. Отдельный
+// обработчик от индикатора текущей точки трека выше: тот специально
+// отключается в этих режимах (см. его guard-условие), а перекрестию,
+// наоборот, нужны именно они. Вызывает drawCrosshairOverlay() напрямую, а
+// не тяжёлый render() — тот на каждый кадр пересчитывал бы весь трек и
+// заметно отставал от курсора (см. комментарий у drawCrosshairOverlay).
+let crosshairRAFPending = false;
+
+el.canvas.addEventListener("mousemove", (e) => {
+  if (!state.mapImage) return;
+  if (!(state.armedForClick || state.repositionArmedIndex !== null)) return;
+  if (crosshairRAFPending) return;
+  crosshairRAFPending = true;
+  requestAnimationFrame(() => {
+    crosshairRAFPending = false;
+    const rect = el.canvas.getBoundingClientRect();
+    state.crosshairPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    drawCrosshairOverlay();
+  });
+});
+
+el.canvas.addEventListener("mouseleave", () => {
+  if (state.crosshairPos) {
+    state.crosshairPos = null;
+    drawCrosshairOverlay();
+  }
+});
+
 // ---------- Панорамирование карты зажатой мышью ----------
 //
 // Работает только там, где под курсором сейчас нет точки трека и мы не
@@ -2089,11 +2321,12 @@ window.addEventListener("mouseup", () => {
 
 // ---------- UI обновление ----------
 
-/** Панель "Темп" осмысленна только когда трек уже спроецирован на карту —
- *  то есть загружены и карта, и трек. До этого её показывать нечего. */
-function updateLegendPanelVisibility() {
+/** Панели "Линия" и "Темп" осмысленны только когда трек уже спроецирован на
+ *  карту — то есть загружены и карта, и трек. До этого их показывать нечего. */
+function updateTrackDependentPanelsVisibility() {
   const ready = !!(state.mapImage && state.trackStats);
   el.legendPanel.classList.toggle("hidden", !ready);
+  el.stylePanel.classList.toggle("hidden", !ready);
 }
 
 function updateStatsPanel() {
