@@ -274,7 +274,7 @@ body.no-map .topbar-actions {
 .panel-toggle h2 { margin: 0; }
 .panel-toggle .chevron {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 13px;
   transition: transform 0.25s ease;
   flex-shrink: 0;
   margin-left: 8px;
@@ -545,6 +545,114 @@ input[type="range"] {
 
 /* ---------- Legend ---------- */
 
+/* Один слайдер с двумя ползунками (границы шкалы темпа "быстро"/"медленно")
+   вместо двух отдельных <input type="range">, которые раньше можно было
+   развести местами (левая граница случайно перетянута правее правой) и
+   которые визуально не читались как единый диапазон. Нативный <input
+   type="range"> не поддерживает два независимых бегунка на одной дорожке,
+   поэтому дорожка/заливка/бегунки — обычные позиционированные div'ы, а
+   перетаскивание обрабатывается вручную через Pointer Events (см. app.js:
+   setupPaceDualRange) — один и тот же код пути работает и для мыши, и для
+   тача. */
+.dual-range {
+  position: relative;
+  height: 22px;
+  margin: 6px 8px 0 2px;
+  touch-action: none; /* иначе перетаскивание бегунка на тач-экране ещё и скроллит страницу */
+}
+.dual-range-track {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 4px;
+  transform: translateY(-50%);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.dual-range-fill {
+  position: absolute;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  background: var(--accent-amber);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.dual-range-thumb {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  margin-left: -8px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: var(--accent-amber);
+  border: 2px solid var(--panel);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+  cursor: grab;
+}
+.dual-range-thumb:active { cursor: grabbing; }
+.dual-range-thumb:focus-visible {
+  outline: 2px solid var(--accent-amber);
+  outline-offset: 2px;
+}
+
+.dual-range-inputs {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.dual-range-input-group {
+  flex: 1;
+  min-width: 0;
+}
+.dual-range-input-group .field-label {
+  display: block;
+  margin-bottom: 4px;
+}
+.input-with-suffix {
+  position: relative;
+}
+/* Правый паддинг освобождает место под суффикс "/км" — он не часть
+   реального значения (не выделяется/не копируется вместе с ним при
+   выделении текста в поле), просто подпись единицы измерения на фоне,
+   поэтому раньше дублирующее "2:34 /км" над полем убрано: то же самое
+   значение и так видно в самом поле ввода. */
+.input-with-suffix input[type="text"] {
+  padding-right: 34px;
+}
+.input-suffix {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  pointer-events: none;
+}
+.dual-range-input-group input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel-raised);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.dual-range-input-group input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-amber);
+}
+.dual-range-input-group input[type="text"]::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
 .legend-gradient {
   height: 10px;
   border-radius: 3px;
@@ -643,6 +751,18 @@ input[type="range"] {
 canvas {
   display: block;
   cursor: grab; /* дефолт для панорамирования зажатой мышью; JS переключает на crosshair/grabbing по ситуации */
+}
+
+/* Перекрестие (см. app.js: drawCrosshairOverlay) рисуется на отдельном
+   канвасе поверх основного — так позицию курсора можно перерисовывать на
+   каждое mousemove без пересчёта всего трека (drawRoute), который иначе
+   визуально "тормозил" перекрестие относительно курсора. pointer-events:
+   none пропускает все события мыши сквозь этот канвас к основному под ним. */
+.crosshair-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
 }
 
 .empty-state {
