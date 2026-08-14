@@ -911,14 +911,17 @@ function drawRoute() {
   const dpr = window.devicePixelRatio || 1;
   routeBufferCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // Толщина линии задаётся в "метрах карты" (пикселях при zoomLevel=1) и
-  // масштабируется вместе с зумом — иначе при уменьшении масштаба карты
-  // линия остаётся того же экранного размера, а сама карта становится
-  // меньше, и трек визуально "толстеет" относительно неё. Обводка
-  // масштабируется точно так же, чтобы её толщина в пикселях экрана не
-  // "плыла" относительно самой линии при зуме.
-  const scaledRouteWidth = state.routeWidth * state.zoomLevel;
-  const scaledOutlineWidth = state.routeOutlineWidth * state.zoomLevel;
+  // Толщина линии задаётся в пикселях НАТУРАЛЬНОГО разрешения скана карты
+  // (т.е. как если бы canvasScale был равен 1) и масштабируется вместе с
+  // canvasScale = fitScale * zoomLevel — и с ручным зумом, и с автоподгонкой
+  // под размер экрана (fitScale). Это важно для консистентности между
+  // устройствами: fitScale на мобильном экране обычно меньше, чем на
+  // десктопе (карта подгоняется под более узкую доступную ширину) — если
+  // масштабировать только по zoomLevel (как было раньше), при одинаковых
+  // routeWidth/routeOutlineWidth линия на мобильном экране выглядела бы
+  // толще карты, чем на десктопе.
+  const scaledRouteWidth = state.routeWidth * state.canvasScale;
+  const scaledOutlineWidth = state.routeOutlineWidth * state.canvasScale;
   const scaledShapeWidth = scaledRouteWidth + scaledOutlineWidth * 2;
 
   const from = Math.max(1, state.trimStart + 1);
@@ -987,13 +990,11 @@ function controlPointLabel(i, total) {
 
 function drawControlPoints() {
   const total = state.controlPoints.length;
-  // Толщина линии трека масштабируется вместе с зумом (см. drawRoute:
-  // scaledRouteWidth = routeWidth * zoomLevel) — кружки и подписи опорных
-  // точек раньше рисовались фиксированного размера в canvas-пикселях, и при
-  // уменьшении масштаба карты (zoomLevel < 1) линия трека становилась
-  // тоньше, а кружки оставались прежними — визуально несоразмерно большими
-  // относительно линии. Масштабируем их точно так же, как и линию.
-  const z = state.zoomLevel;
+  // Как и у толщины линии (см. drawRoute) — масштабируем по canvasScale
+  // (fitScale * zoomLevel), а не только по zoomLevel, иначе маркеры на
+  // мобильном экране (где fitScale меньше) выглядят непропорционально
+  // крупными относительно карты по сравнению с десктопом.
+  const z = state.canvasScale;
   const r = 6 * z;
   const colorWidth = 1.2 * z;
   state.controlPoints.forEach((cp, i) => {
