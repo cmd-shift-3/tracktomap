@@ -771,7 +771,6 @@ input[type="range"] {
   border-radius: 6px;
   overflow: hidden;
   background: #0b0f12;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
   /* На тач-устройствах разрешаем только панорамирование (скролл контейнера
      .canvas-area), но не нативный pinch/double-tap zoom браузера — в
      приложении уже есть свой ползунок масштаба, а двойной тап зарезервирован
