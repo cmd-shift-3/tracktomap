@@ -6,6 +6,30 @@ const MARKER_OUTLINE_COLOR = "#000000";
 const MARKER_OUTLINE_WIDTH = 0.6; // очень тонкая, но заметная чёрная оконтовка
 const DEFAULT_PACE_COLOR_STOPS = ["#0cdf59", "#f6fa00", "#fbad28", "#ff1414"]; // зелёный(12,223,89) → жёлтый(246,250,0) → оранжевый(251,173,40) → красный(255,20,20) — дефолт и цель кнопки "Сбросить цвета"
 
+// Коэффициент компенсации толщины линии/маркеров на мобильном экране.
+// Толщина линии/маркеров исторически задаётся в CSS-пикселях через
+// zoomLevel (см. drawRoute/drawControlPoints) — но на мобильном экране
+// fitScale (см. computeFitScale) заметно МЕНЬШЕ, чем на десктопе, т.к.
+// карта подгоняется под более узкую доступную ширину экрана: сама карта на
+// экране физически МЕЛЬЧЕ. Значит, чтобы линия сохраняла ту же толщину
+// ОТНОСИТЕЛЬНО карты, что и на десктопе, её абсолютная толщина в CSS-
+// пикселях должна быть МЕНЬШЕ на мобильном (а не больше) — коэффициент
+// меньше единицы. Домножать на весь canvasScale (fitScale*zoomLevel)
+// нельзя — тогда толщина начинает зависеть ещё и от разрешения конкретного
+// скана карты (natW/natH тоже входят в fitScale), а этого не нужно: нужна
+// компенсация именно разницы МОБИЛЬНОГО/ДЕСКТОПНОГО layout'а, не более.
+// Коэффициент подобран как отношение типичных fitScale mobile/desktop для
+// одной и той же карты (0.1625 / 0.286328125 ≈ 0.5676) — при таком
+// отношении natW/natH сокращаются (пока fitScale упирается в ширину, а не
+// в потолок 1.4x), остаётся чистая разница доступной ширины контейнера.
+const MOBILE_LINE_WIDTH_COMPENSATION = 0.5676;
+
+/** 1 на десктопе (без изменений — как было исторически), MOBILE_LINE_WIDTH_
+ *  COMPENSATION на мобильном layout'е (см. константу выше). */
+function lineWidthCompensation() {
+  return isMobileLayout() ? MOBILE_LINE_WIDTH_COMPENSATION : 1;
+}
+
 const state = {
   mapImage: null, // HTMLImageElement
   fitScale: 1, // масштаб "по размеру окна" (без учёта зума пользователя)
@@ -911,17 +935,14 @@ function drawRoute() {
   const dpr = window.devicePixelRatio || 1;
   routeBufferCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // Толщина линии задаётся в пикселях НАТУРАЛЬНОГО разрешения скана карты
-  // (т.е. как если бы canvasScale был равен 1) и масштабируется вместе с
-  // canvasScale = fitScale * zoomLevel — и с ручным зумом, и с автоподгонкой
-  // под размер экрана (fitScale). Это важно для консистентности между
-  // устройствами: fitScale на мобильном экране обычно меньше, чем на
-  // десктопе (карта подгоняется под более узкую доступную ширину) — если
-  // масштабировать только по zoomLevel (как было раньше), при одинаковых
-  // routeWidth/routeOutlineWidth линия на мобильном экране выглядела бы
-  // толще карты, чем на десктопе.
-  const scaledRouteWidth = state.routeWidth * state.canvasScale;
-  const scaledOutlineWidth = state.routeOutlineWidth * state.canvasScale;
+  // Толщина линии задаётся в "метрах карты" (пикселях при zoomLevel=1) и
+  // масштабируется вместе с зумом — иначе при уменьшении масштаба карты
+  // линия остаётся того же экранного размера, а сама карта становится
+  // меньше, и трек визуально "толстеет" относительно неё. Обводка
+  // масштабируется точно так же, чтобы её толщина в пикселях экрана не
+  // "плыла" относительно самой линии при зуме.
+  const scaledRouteWidth = state.routeWidth * state.zoomLevel * lineWidthCompensation();
+  const scaledOutlineWidth = state.routeOutlineWidth * state.zoomLevel * lineWidthCompensation();
   const scaledShapeWidth = scaledRouteWidth + scaledOutlineWidth * 2;
 
   const from = Math.max(1, state.trimStart + 1);
@@ -990,11 +1011,17 @@ function controlPointLabel(i, total) {
 
 function drawControlPoints() {
   const total = state.controlPoints.length;
-  // Как и у толщины линии (см. drawRoute) — масштабируем по canvasScale
-  // (fitScale * zoomLevel), а не только по zoomLevel, иначе маркеры на
-  // мобильном экране (где fitScale меньше) выглядят непропорционально
-  // крупными относительно карты по сравнению с десктопом.
-  const z = state.canvasScale;
+  // Толщина линии трека масштабируется вместе с зумом (см. drawRoute:
+  // scaledRouteWidth = routeWidth * zoomLevel) — кружки и подписи опорных
+  // точек раньше рисовались фиксированного размера в canvas-пикселях, и при
+  // уменьшении масштаба карты (zoomLevel < 1) линия трека становилась
+  // тоньше, а кружки оставались прежними — визуально несоразмерно большими
+  // относительно линии. Масштабируем их точно так же, как и линию.
+  // Как и у толщины линии (см. drawRoute/lineWidthCompensation) —
+  // компенсируем меньший fitScale на мобильном layout'е, иначе кружки
+  // опорных точек выглядят непропорционально крупными относительно карты
+  // по сравнению с десктопом.
+  const z = state.zoomLevel * lineWidthCompensation();
   const r = 6 * z;
   const colorWidth = 1.2 * z;
   state.controlPoints.forEach((cp, i) => {
@@ -3028,6 +3055,22 @@ function clearAllData() {
   ctx.clearRect(0, 0, el.canvas.width, el.canvas.height);
   ctx.restore();
   clearCrosshairOverlay();
+
+  // Сброс инлайновых CSS-размеров канваса (проставленных applyCanvasSize
+  // при загрузке карты) — без этого .canvas-wrap (который подстраивается
+  // под фактический размер канваса) оставался бы размером последней
+  // загруженной карты, и окно дропзоны для перетаскивания файлов
+  // показывалось бы неоправданно большим вместо исходного компактного
+  // размера (см. .layout.no-map .canvas-wrap в style.css — её min-width/
+  // min-height применяются только когда явный размер канваса не задан).
+  el.canvas.style.width = "";
+  el.canvas.style.height = "";
+  el.canvas.width = 0;
+  el.canvas.height = 0;
+  el.crosshairCanvas.style.width = "";
+  el.crosshairCanvas.style.height = "";
+  el.crosshairCanvas.width = 0;
+  el.crosshairCanvas.height = 0;
 
   // Возврат полей стиля линии/зума к дефолтным значениям.
   paceColorInputs.forEach((inputEl, i) => {
