@@ -472,6 +472,13 @@ async function restoreStateFromStorage() {
         state.trimStart = 0;
       }
       state.selectedTrackIndex = clampInt(saved.selectedTrackIndex, state.trimStart, state.trimEnd);
+      // Маркер текущей точки не должен казаться "зафиксированным" сразу
+      // после восстановления сохранённого состояния — как и после
+      // добавления опорной точки (см. её обработчик клика), он должен
+      // появляться только когда пользователь сам явно выберет/наведётся на
+      // точку трека, а не висеть на прежнем selectedTrackIndex с прошлой
+      // сессии.
+      state.currentIndicatorVisible = false;
 
       state.controlPoints = [];
       if (Array.isArray(saved.controlPoints)) {
@@ -1069,32 +1076,40 @@ function drawCurrentIndicator() {
   const idx = state.hoverTrackIndex !== null ? state.hoverTrackIndex : state.selectedTrackIndex;
   const pt = imgToCanvas(projectTrackPoint(idx));
 
+  // Масштабируется точно так же, как опорные точки (см. drawControlPoints) —
+  // и через zoomLevel (ручной зум), и через lineWidthCompensation() (разница
+  // мобильного/десктопного layout'а) — раньше все размеры здесь были
+  // захардкожены и не менялись ни при зуме, ни между устройствами.
+  const z = state.zoomLevel * lineWidthCompensation();
+
   ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 10, 0, Math.PI * 2);
+  ctx.arc(pt.x, pt.y, 10 * z, 0, Math.PI * 2);
   ctx.fillStyle = "rgba(242, 184, 181, 0.22)";
   ctx.fill();
 
   ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
+  ctx.arc(pt.x, pt.y, 5 * z, 0, Math.PI * 2);
   ctx.fillStyle = CURRENT_POINT_COLOR;
   ctx.fill();
   // Тонкая чёрная обводка вокруг самой точки — без неё светлый оттенок
   // теряется на светлых участках карты.
-  ctx.lineWidth = MARKER_OUTLINE_WIDTH * 1.25;
+  ctx.lineWidth = MARKER_OUTLINE_WIDTH * 1.25 * z;
   ctx.strokeStyle = MARKER_OUTLINE_COLOR;
   ctx.stroke();
 
   const label = elapsedLabel(idx) ?? `№${idx}`;
-  ctx.font = "bold 16px system-ui, sans-serif";
+  const fontPx = Math.max(10, Math.round(16 * z));
+  const labelOffset = 16 * z;
+  ctx.font = `bold ${fontPx}px system-ui, sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   // Обводка подписи заметно толще, чем у опорных точек — иначе цифры на
   // светлом фоне карты сливаются со светлым цветом текущей точки.
-  ctx.lineWidth = MARKER_OUTLINE_WIDTH * 4.5;
+  ctx.lineWidth = MARKER_OUTLINE_WIDTH * 4.5 * z;
   ctx.strokeStyle = MARKER_OUTLINE_COLOR;
-  ctx.strokeText(label, pt.x, pt.y - 16);
+  ctx.strokeText(label, pt.x, pt.y - labelOffset);
   ctx.fillStyle = CURRENT_POINT_COLOR;
-  ctx.fillText(label, pt.x, pt.y - 16);
+  ctx.fillText(label, pt.x, pt.y - labelOffset);
 }
 
 /** Пунктирное перекрестие на всю ширину/высоту канваса в точке курсора —
