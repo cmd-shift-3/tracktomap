@@ -1098,8 +1098,8 @@ function drawCurrentIndicator() {
   ctx.stroke();
 
   const label = elapsedLabel(idx) ?? `№${idx}`;
-  const fontPx = Math.max(10, Math.round(16 * z));
-  const labelOffset = 16 * z;
+  const fontPx = Math.max(10, Math.round(14 * z)); // тот же базовый размер (14), что и у опорных точек — см. drawControlPoints
+  const labelOffset = 14 * z;
   ctx.font = `bold ${fontPx}px system-ui, sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
