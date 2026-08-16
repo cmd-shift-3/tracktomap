@@ -2601,11 +2601,108 @@ el.editTrimButton.addEventListener("click", openTrimModal);
 
 
 // ---------- Сворачиваемые панели (общая логика для всех .collapsible) ----------
+//
+// Раньше max-height анимировался между двумя ФИКСИРОВАННЫМИ значениями —
+// 800px (с запасом больше любой реальной панели) и 0. Проблема: реальная
+// высота контента почти всегда заметно меньше 800px (скажем, 300px). При
+// СВОРАЧИВАНИИ анимируемое значение сначала должно "проехать" невидимый
+// диапазон от 800 до 300 (в это время высота блока и так уже держится на
+// реальной высоте контента — ничего визуально не меняется), и только
+// после этого начинается настоящее схлопывание 300 -> 0, сжатое в
+// оставшийся хвост времени транзишна — именно это ощущалось как рывок при
+// сворачивании. При РАЗВОРАЧИВАНИИ той же проблемы нет: видимый рост идёт
+// сразу с первого кадра (пока max-height ещё меньше высоты контента),
+// поэтому анимация открытия выглядела гладкой.
+//
+// Исправление — измерять РЕАЛЬНУЮ высоту содержимого (scrollHeight) прямо
+// перед стартом анимации и анимировать именно её, а не произвольные 800px:
+// тогда весь диапазон транзишна используется на видимое движение, в обе
+// стороны одинаково плавно. scrollHeight у .panel-collapse-inner измеряется
+// корректно независимо от того, схлопнут ли сейчас .panel-collapse
+// (overflow:hidden/max-height родителя обрезает ОТРИСОВКУ, а не расчёт
+// реального layout-размера потомка).
+//
+// После полного разворачивания max-height переключается на "none" (см.
+// transitionend ниже) — это снимает жёсткое ограничение высоты, чтобы
+// последующий рост контента ВНУТРИ уже открытой панели (например, список
+// опорных точек при добавлении новых) не обрезался старым замороженным
+// значением. Перед следующим сворачиванием высота всё равно домеряется
+// заново с нуля, так что устаревших значений не остаётся.
+function setPanelCollapsed(panel, collapsed) {
+  const collapseEl = panel.querySelector(".panel-collapse");
+  const innerEl = panel.querySelector(".panel-collapse-inner");
+  if (collapseEl && innerEl) {
+    if (collapsed) {
+      // Фиксируем ТЕКУЩУЮ (открытую) высоту явным пикселем — стартовая
+      // точка транзишна к 0. Без принудительного reflow между двумя
+      // присваиваниями браузер мог бы схлопнуть их в одно и transition
+      // не сработал бы (переход "800px -> 0" в одном кадре вместо
+      // "реальная высота -> 0" за отведённое время).
+      collapseEl.style.maxHeight = collapseEl.scrollHeight + "px";
+      void collapseEl.offsetHeight; // форсированный reflow — фиксирует значение выше как исходное для transition
+      collapseEl.style.maxHeight = "0px";
+    } else {
+      collapseEl.style.maxHeight = innerEl.scrollHeight + "px";
+    }
+  }
+  panel.classList.toggle("collapsed", collapsed);
+}
+
+document.querySelectorAll(".collapsible").forEach((panel) => {
+  const collapseEl = panel.querySelector(".panel-collapse");
+  const innerEl = panel.querySelector(".panel-collapse-inner");
+  if (!collapseEl || !innerEl) return;
+
+  collapseEl.addEventListener("transitionend", (e) => {
+    if (e.propertyName !== "max-height") return;
+    if (!panel.classList.contains("collapsed")) {
+      // Разворачивание завершилось — снимаем жёсткое ограничение высоты
+      // (см. комментарий выше), но только пока панель ДЕЙСТВИТЕЛЬНО
+      // открыта на этот момент (могли успеть кликнуть ещё раз за время
+      // анимации).
+      collapseEl.style.maxHeight = "none";
+    }
+  });
+
+  // "Прогрев" — без него САМОЕ ПЕРВОЕ реальное изменение max-height у
+  // КАЖДОЙ отдельной панели (с contain/will-change, см. style.css) заметно
+  // тормозило: в момент первого изменения размера такого элемента браузер
+  // один раз выполняет внутреннюю подготовку (строит границу layout-
+  // контейнмента для ЭТОГО КОНКРЕТНОГО элемента) — и эта разовая
+  // подготовка стоит заметно дороже обычного кадра анимации. У каждой
+  // панели этот "первый раз" свой собственный (подготовка привязана к
+  // элементу, а не глобальная), поэтому тормозило первое сворачивание
+  // КАЖДОЙ вкладки по отдельности, а не только самой первой на странице.
+  //
+  // Прогоняем тот же цикл изменения размера (открыто -> 0 -> открыто/0,
+  // в зависимости от исходного состояния панели) один раз сразу при
+  // загрузке страницы, но с ВЫКЛЮЧЕННЫМ transition — визуально ничего не
+  // "моргает" (браузер не рисует промежуточные кадры внутри одного
+  // синхронного блока JS до передачи управления обратно в event loop), а
+  // вся разовая стоимость подготовки уходит в загрузку страницы, а не в
+  // момент, когда пользователь реально кликает по панели в первый раз.
+  const startedCollapsed = panel.classList.contains("collapsed");
+  const openHeight = innerEl.scrollHeight;
+  collapseEl.style.transition = "none";
+  collapseEl.style.maxHeight = "0px";
+  void collapseEl.offsetHeight;
+  collapseEl.style.maxHeight = openHeight + "px";
+  void collapseEl.offsetHeight;
+  if (startedCollapsed) {
+    collapseEl.style.maxHeight = "0px";
+    void collapseEl.offsetHeight;
+  }
+  requestAnimationFrame(() => {
+    collapseEl.style.transition = "";
+    if (!startedCollapsed) collapseEl.style.maxHeight = "none";
+  });
+});
 
 document.querySelectorAll(".collapsible > .panel-toggle").forEach((toggleBtn) => {
   toggleBtn.addEventListener("click", () => {
     const panel = toggleBtn.closest(".collapsible");
-    const collapsed = panel.classList.toggle("collapsed");
+    const collapsed = !panel.classList.contains("collapsed");
+    setPanelCollapsed(panel, collapsed);
     toggleBtn.setAttribute("aria-expanded", String(!collapsed));
   });
 });
